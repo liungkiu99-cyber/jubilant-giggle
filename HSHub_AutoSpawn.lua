@@ -134,6 +134,7 @@ end
 
 -- ═════════════ AUTONOMOUS LOOP ═══════════════════════════════════
 local busy = false
+local wasAlive = false   -- edge detector: only respawn on a real alive->dead transition
 local function spawnSeq()
     replay(NAME_SPAWN)
     task.wait(jit(SPAWN_SETTLE[1], SPAWN_SETTLE[2]))
@@ -142,10 +143,14 @@ end
 task.spawn(function()
     while true do
         task.wait(0.6)
-        if RUNNING and AUTO_RESPAWN and not busy and not isAlive() then
-            if captured[NAME_SPAWN] then
+        if RUNNING and not busy then
+            local cur = isAlive()
+            if cur then
+                wasAlive = true                        -- alive: arm the death edge
+            elseif wasAlive and AUTO_RESPAWN and captured[NAME_SPAWN] then
+                -- EDGE alive->dead = a REAL death (not just sitting in the menu)
                 busy = true
-                logFn('☠ death — restart sequence')
+                logFn('☠ death detected — restart+spawn')
                 task.wait(jit(DEATH_REACT[1], DEATH_REACT[2]))
                 if captured[NAME_RESTART] then
                     replay(NAME_RESTART)
@@ -153,8 +158,13 @@ task.spawn(function()
                 end
                 spawnSeq()
                 task.wait(jit(SPAWN_SETTLE[1], SPAWN_SETTLE[2]))
+                wasAlive = isAlive()                   -- true if respawn worked
+                if not wasAlive then
+                    logFn('respawn did not take — auto idles (no spam). Spawn manually then it re-arms.', true)
+                end
                 busy = false
             end
+            -- not alive AND not wasAlive => at menu / not spawned => DO NOTHING (you can press game buttons)
         end
     end
 end)
@@ -259,7 +269,9 @@ rInv.MouseButton1Click:Connect(function() replay(NAME_INVIS) end)
 startBtn.MouseButton1Click:Connect(function()
     if RUNNING then return end
     RUNNING = true; busy = false
+    wasAlive = isAlive()   -- begin from current truth: at menu(false)=idle, in-game(true)=watch for death
     logFn(('STARTED. respawn=%s stealth=%s  alive=%s h=%s'):format(tostring(AUTO_RESPAWN), tostring(STEALTH), tostring(isAlive()), tostring(getHealth())))
+    if not isAlive() then logFn('not spawned yet → idle. Spawn your creature (or Replay Spawn); auto re-arms on death.') end
     if not captured[NAME_SPAWN] then logFn('⚠ SPAWN not learned — press Play once first!', true) end
 end)
 stopBtn.MouseButton1Click:Connect(function() RUNNING = false; busy = false; logFn('STOPPED.') end)
