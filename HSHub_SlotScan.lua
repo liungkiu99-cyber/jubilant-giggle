@@ -29,7 +29,10 @@ local PG        = LP:WaitForChild('PlayerGui')
 
 local NODE_CAP = 3000
 local DEPTH_CAP = 10
-local MENU_WORDS = { 'Mainkan', 'Beli Slot', 'MATI', 'Mulai ulang', 'Menghidupkan', 'Tukarkan' }
+-- "Beli Slot" + "Tukarkan" are unique to the creature-slot menu; generic words like
+-- MATI also appear in other popups (e.g. DailyLogin) so we PRIORITISE the specific ones.
+local STRONG_WORDS = { 'Beli Slot', 'Tukarkan', 'Mulai ulang' }
+local WEAK_WORDS   = { 'Mainkan', 'MATI', 'Menghidupkan' }
 
 -- ═════════════ helpers ═══════════════════════════════════════════
 local function getText(inst)
@@ -47,8 +50,8 @@ local function attrs(inst)
     end)
     return out
 end
-local function hasWord(s)
-    for _, w in ipairs(MENU_WORDS) do if s:find(w, 1, true) then return true end end
+local function anyOf(s, list)
+    for _, w in ipairs(list) do if s:find(w, 1, true) then return true end end
     return false
 end
 
@@ -78,21 +81,52 @@ local function dumpTree(inst, depth)
     return node
 end
 
--- ═════════════ find the creature-menu ScreenGuis ═════════════════
+-- ═════════════ gather GUI roots (PlayerGui + gethui + CoreGui) ════
+local function guiRoots()
+    local roots = {}
+    roots[#roots + 1] = PG
+    pcall(function() if gethui then local h = gethui(); if h and h ~= PG then roots[#roots + 1] = h end end end)
+    pcall(function() roots[#roots + 1] = game:GetService('CoreGui') end)
+    return roots
+end
+
+-- list every top-level ScreenGui/Folder under all roots (so we always see what exists)
+local function allGuis()
+    local out = {}
+    for _, r in ipairs(guiRoots()) do
+        pcall(function()
+            for _, sg in ipairs(r:GetChildren()) do
+                out[#out + 1] = { name = sg.Name, class = sg.ClassName, parent = r.Name }
+            end
+        end)
+    end
+    return out
+end
+
+-- find the creature-slot menu: STRONG word match wins; else WEAK. Returns matches with score.
 local function findMenus()
     local out = {}
-    for _, sg in ipairs(PG:GetChildren()) do
-        if sg:IsA('ScreenGui') or sg:IsA('Folder') then
-            local hit = false
-            pcall(function()
-                for _, d in ipairs(sg:GetDescendants()) do
-                    local tx = getText(d)
-                    if tx and hasWord(tx) then hit = true; break end
+    for _, r in ipairs(guiRoots()) do
+        pcall(function()
+            for _, sg in ipairs(r:GetChildren()) do
+                if sg:IsA('ScreenGui') or sg:IsA('Folder') then
+                    local strong, weak = false, false
+                    pcall(function()
+                        for _, d in ipairs(sg:GetDescendants()) do
+                            local tx = getText(d)
+                            if tx then
+                                if anyOf(tx, STRONG_WORDS) then strong = true
+                                elseif anyOf(tx, WEAK_WORDS) then weak = true end
+                            end
+                        end
+                    end)
+                    if strong then out[#out + 1] = { gui = sg, score = 2 }
+                    elseif weak then out[#out + 1] = { gui = sg, score = 1 } end
                 end
-            end)
-            if hit then out[#out + 1] = sg end
-        end
+            end
+        end)
     end
+    table.sort(out, function(a, b) return a.score > b.score end)
     return out
 end
 
@@ -184,16 +218,24 @@ end
 local function doScan()
     nodeCount = 0
     local menus = findMenus()
-    local menuTrees, slotCards = {}, {}
+    -- dump the strongest matches: all score-2 (definitive slot menu); if none, the score-1 ones
+    local topScore = menus[1] and menus[1].score or 0
+    local menuTrees, slotCards, dumpedNames = {}, {}, {}
     for _, m in ipairs(menus) do
-        menuTrees[#menuTrees + 1] = dumpTree(m, 0)
-        for _, card in ipairs(collectSlotCards(m)) do slotCards[#slotCards + 1] = card end
+        if m.score == topScore then
+            menuTrees[#menuTrees + 1] = dumpTree(m.gui, 0)
+            dumpedNames[#dumpedNames + 1] = m.gui.Name
+            for _, card in ipairs(collectSlotCards(m.gui)) do slotCards[#slotCards + 1] = card end
+        end
     end
     local report = {
         time = os.date('%Y-%m-%d %H:%M:%S'),
         place_id = game.PlaceId,
         in_game = inGame(),
         menu_count = #menus,
+        dumped = dumpedNames,
+        top_score = topScore,   -- 2 = found the real slot menu (Beli Slot/Tukarkan), 1 = weak, 0 = none
+        all_guis = allGuis(),
         node_count = nodeCount,
         slot_cards = slotCards,
         lp_children = lpChildren(),
@@ -204,7 +246,7 @@ local function doScan()
     local saved = false
     pcall(function() if writefile then writefile(path, json); saved = true end end)
     pcall(function() if setclipboard then setclipboard(json) elseif toclipboard then toclipboard(json) end end)
-    return saved, path, #slotCards, #menus
+    return saved, path, #slotCards, #menus, topScore
 end
 
 -- ═════════════ UI ════════════════════════════════════════════════
@@ -257,9 +299,13 @@ logRow('Open the slot menu (cards + Beli Slot) then tap Scan.', Color3.fromRGB(2
 
 scanBtn.MouseButton1Click:Connect(function()
     for _, c in ipairs(scroll:GetChildren()) do if c:IsA('TextLabel') then c:Destroy() end end
-    local saved, path, ncards, nmenus = doScan()
-    logRow(('menus=%d  slot_cards=%d  nodes=%d  in_game=%s'):format(nmenus, ncards, nodeCount, tostring(inGame())), Color3.fromRGB(170, 230, 180))
+    local saved, path, ncards, nmenus, topScore = doScan()
+    logRow(('top_score=%d  slot_cards=%d  nodes=%d  in_game=%s'):format(topScore, ncards, nodeCount, tostring(inGame())),
+        topScore >= 2 and Color3.fromRGB(170, 230, 180) or Color3.fromRGB(255, 200, 120))
     logRow(saved and ('Saved: workspace/' .. path) or 'Save FAILED (no writefile)', Color3.fromRGB(170, 230, 180))
     logRow('JSON also in clipboard. Send it.', Color3.fromRGB(180, 220, 255))
-    if nmenus == 0 then logRow('No menu found — open the creature/slot screen FIRST, then Scan.', Color3.fromRGB(255, 150, 150)) end
+    if topScore < 2 then
+        logRow('⚠ slot menu NOT found (no "Beli Slot"/"Tukarkan"). OPEN the creature', Color3.fromRGB(255, 150, 150))
+        logRow('  menu (close the daily-login popup) then Scan again.', Color3.fromRGB(255, 150, 150))
+    end
 end)
