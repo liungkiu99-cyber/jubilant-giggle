@@ -254,7 +254,7 @@ local function doScan()
         menu_trees = menuTrees,
     }
     local json = toJSON(report)
-    local path = ('HSHub_SlotScan_%s_%d.json'):format(tostring(game.PlaceId), os.time())
+    local path = 'HSHub_SlotScan_latest.json'   -- FIXED name (overwrites) so there's only ONE file, always current
     local saved = false
     pcall(function() if writefile then writefile(path, json); saved = true end end)
     pcall(function() if setclipboard then setclipboard(json) elseif toclipboard then toclipboard(json) end end)
@@ -269,7 +269,7 @@ gui.Parent = (gethui and gethui()) or PG
 shared.__HSHub_SlotScan = gui
 
 local frame = Instance.new('Frame', gui)
-frame.Size = UDim2.new(0, 380, 0, 320); frame.Position = UDim2.new(0, 20, 0.4, -160)
+frame.Size = UDim2.new(0, 400, 0, 540); frame.Position = UDim2.new(0, 20, 0.5, -270)
 frame.BackgroundColor3 = Color3.fromRGB(18, 20, 28); frame.BorderSizePixel = 0; frame.Active = true; frame.Draggable = true
 Instance.new('UICorner', frame).CornerRadius = UDim.new(0, 10)
 local stroke = Instance.new('UIStroke', frame); stroke.Color = Color3.fromRGB(90, 180, 220); stroke.Thickness = 1.5
@@ -293,7 +293,7 @@ scanBtn.Font = Enum.Font.GothamBold; scanBtn.TextSize = 14; scanBtn.TextColor3 =
 Instance.new('UICorner', scanBtn).CornerRadius = UDim.new(0, 6)
 
 local scroll = Instance.new('ScrollingFrame', frame)
-scroll.Size = UDim2.new(1, -20, 0, 200); scroll.Position = UDim2.new(0, 10, 0, 100)
+scroll.Size = UDim2.new(1, -20, 0, 420); scroll.Position = UDim2.new(0, 10, 0, 100)
 scroll.BackgroundColor3 = Color3.fromRGB(12, 14, 20); scroll.BorderSizePixel = 0
 scroll.ScrollBarThickness = 4; scroll.ScrollBarImageColor3 = Color3.fromRGB(90, 180, 220)
 Instance.new('UICorner', scroll).CornerRadius = UDim.new(0, 6)
@@ -309,15 +309,41 @@ local function logRow(text, color)
 end
 logRow('Open the slot menu (cards + Beli Slot) then tap Scan.', Color3.fromRGB(200, 210, 150))
 
+-- print every text-bearing node of a GUI to the panel (screenshot-able, no file needed)
+local function printGuiTexts(gui, tag)
+    if not gui then logRow('('..tag..' not found)', Color3.fromRGB(255,150,150)); return end
+    logRow('══ '..tag..' ══', Color3.fromRGB(120, 220, 255))
+    local n = 0
+    local function walk(inst, depth)
+        if n >= 60 then return end
+        for _, c in ipairs(inst:GetChildren()) do
+            local tx = getText(c)
+            if tx and tx:gsub('%s','') ~= '' then
+                n = n + 1
+                local col = Color3.fromRGB(190, 210, 230)
+                if tx:find('MATI', 1, true) then col = Color3.fromRGB(255, 130, 130)
+                elseif tx:find('Mainkan', 1, true) or tx:find('Mulai', 1, true) then col = Color3.fromRGB(150, 230, 150) end
+                logRow(('%s%s: %s'):format(string.rep('· ', math.min(depth,6)), c.Name, tx:sub(1,42)), col)
+            end
+            if n >= 60 then return end
+            walk(c, depth + 1)
+        end
+    end
+    pcall(walk, gui, 0)
+    if n == 0 then logRow('  (no text nodes — menu maybe closed/empty)', Color3.fromRGB(255,200,120)) end
+end
+
 scanBtn.MouseButton1Click:Connect(function()
     for _, c in ipairs(scroll:GetChildren()) do if c:IsA('TextLabel') then c:Destroy() end end
     local saved, path, ncards, nmenus, topScore = doScan()
-    logRow(('top_score=%d  slot_cards=%d  nodes=%d  in_game=%s'):format(topScore, ncards, nodeCount, tostring(inGame())),
-        topScore >= 2 and Color3.fromRGB(170, 230, 180) or Color3.fromRGB(255, 200, 120))
-    logRow(saved and ('Saved: workspace/' .. path) or 'Save FAILED (no writefile)', Color3.fromRGB(170, 230, 180))
-    logRow('JSON also in clipboard. Send it.', Color3.fromRGB(180, 220, 255))
-    if topScore < 2 then
-        logRow('⚠ slot menu NOT found (no "Beli Slot"/"Tukarkan"). OPEN the creature', Color3.fromRGB(255, 150, 150))
-        logRow('  menu (close the daily-login popup) then Scan again.', Color3.fromRGB(255, 150, 150))
+    logRow(('top_score=%d  saved=%s'):format(topScore, tostring(saved)), Color3.fromRGB(170, 230, 180))
+    -- the screenshot-able readout: dump the slot menus' text directly
+    for _, r in ipairs(guiRoots()) do
+        for _, want in ipairs({ 'SaveSelectionGui', 'DeathGui', 'SlotOverlayGui' }) do
+            local g = r:FindFirstChild(want)
+            if g then printGuiTexts(g, want) end
+        end
     end
+    logRow('FILE: workspace/HSHub_SlotScan_latest.json  (always this name — send THIS)', Color3.fromRGB(180, 220, 255))
+    logRow('↑ or just SCREENSHOT this panel (scroll for more).', Color3.fromRGB(255, 220, 140))
 end)
