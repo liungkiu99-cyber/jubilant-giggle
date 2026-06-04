@@ -33,6 +33,8 @@ local DEPTH_CAP = 10
 -- MATI also appear in other popups (e.g. DailyLogin) so we PRIORITISE the specific ones.
 local STRONG_WORDS = { 'Beli Slot', 'Tukarkan', 'Mulai ulang' }
 local WEAK_WORDS   = { 'Mainkan', 'MATI', 'Menghidupkan' }
+-- known slot-menu GUIs (from all_guis dump) — dump these by NAME, always, regardless of text
+local TARGET_GUIS  = { 'SaveSelectionGui', 'DeathGui', 'SlotOverlayGui', 'SlotSpinnerGui', 'CreatureInfoGui' }
 
 -- ═════════════ helpers ═══════════════════════════════════════════
 local function getText(inst)
@@ -218,15 +220,25 @@ end
 local function doScan()
     nodeCount = 0
     local menus = findMenus()
-    -- dump the strongest matches: all score-2 (definitive slot menu); if none, the score-1 ones
     local topScore = menus[1] and menus[1].score or 0
     local menuTrees, slotCards, dumpedNames = {}, {}, {}
-    for _, m in ipairs(menus) do
-        if m.score == topScore then
-            menuTrees[#menuTrees + 1] = dumpTree(m.gui, 0)
-            dumpedNames[#dumpedNames + 1] = m.gui.Name
-            for _, card in ipairs(collectSlotCards(m.gui)) do slotCards[#slotCards + 1] = card end
+    local seen = {}
+    local function dumpGui(g)
+        if not g or seen[g] then return end
+        seen[g] = true
+        menuTrees[#menuTrees + 1] = dumpTree(g, 0)
+        dumpedNames[#dumpedNames + 1] = g.Name
+        for _, card in ipairs(collectSlotCards(g)) do slotCards[#slotCards + 1] = card end
+    end
+    -- 1) ALWAYS dump the known slot-menu GUIs by name (across all roots)
+    for _, r in ipairs(guiRoots()) do
+        for _, want in ipairs(TARGET_GUIS) do
+            pcall(function() dumpGui(r:FindFirstChild(want)) end)
         end
+    end
+    -- 2) also dump the strongest text-matched menu (covers renamed/unknown menus)
+    for _, m in ipairs(menus) do
+        if m.score == topScore then dumpGui(m.gui) end
     end
     local report = {
         time = os.date('%Y-%m-%d %H:%M:%S'),
