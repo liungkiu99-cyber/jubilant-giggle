@@ -75,30 +75,41 @@ end
 -- find the VISIBLE Mainkan/Play button (the green one on the centered card),
 -- NOT the hidden global PlayButton. Match by text, require visible ancestor chain.
 local PLAY_TEXTS = { ['Mainkan'] = true, ['MAINKAN'] = true, ['Play'] = true, ['PLAY'] = true }
-local function findPlayButton()
+-- collect ALL visible Mainkan/Play candidates {btn, text, x, y, parent}; log them
+local function playCandidates(doLog)
+    local out = {}
     for _, gname in ipairs({ 'SaveSelectionGui', 'SlotOverlayGui' }) do
         for _, r in ipairs({ PG, gethui and gethui() or PG }) do
             local g = r:FindFirstChild(gname)
             if g then
                 for _, d in ipairs(g:GetDescendants()) do
-                    if d:IsA('TextLabel') and PLAY_TEXTS[d.Text] then
-                        -- walk up to the clickable, visible ancestor
-                        local n = d
-                        while n and n ~= g do
-                            if (n:IsA('ImageButton') or n:IsA('TextButton')) and visibleChain(n) then return n end
-                            n = n.Parent
+                    if (d:IsA('TextButton') or d:IsA('ImageButton')) and visibleChain(d) then
+                        -- does this button (or a small child) carry Mainkan/Play text?
+                        local txt
+                        if d:IsA('TextButton') and PLAY_TEXTS[d.Text] then txt = d.Text end
+                        if not txt then for _, c in ipairs(d:GetDescendants()) do if c:IsA('TextLabel') and PLAY_TEXTS[c.Text] then txt = c.Text; break end end end
+                        if txt then
+                            local x, y = centerOf(d)
+                            out[#out + 1] = { btn = d, text = txt, x = x, y = y, name = d.Name, parent = d.Parent and d.Parent.Name or '?' }
                         end
                     end
                 end
             end
         end
     end
-    -- fallback: any visible PlayButton-named clickable
-    local g = findSaveGui()
-    if g then for _, d in ipairs(g:GetDescendants()) do
-        if d.Name == 'PlayButton' and (d:IsA('ImageButton') or d:IsA('TextButton')) and visibleChain(d) then return d end
-    end end
-    return nil
+    if doLog then
+        logFn('Mainkan candidates: ' .. #out, Color3.fromRGB(120, 210, 255))
+        for _, c in ipairs(out) do logFn(('  %s "%s" @(%d,%d) parent=%s'):format(c.name, c.text, math.floor(c.x), math.floor(c.y), c.parent)) end
+    end
+    return out
+end
+local function findPlayButton()
+    local c = playCandidates(false)
+    if #c == 0 then return nil end
+    -- the real green Mainkan sits at the BOTTOM of the centered card (largest Y);
+    -- favorite/Simpan & hidden ones are higher. Pick the lowest-on-screen visible candidate.
+    table.sort(c, function(a, b) return a.y > b.y end)
+    return c[1].btn
 end
 local function readSlots()
     local out = {}; local gui = findSaveGui(); if not gui then return out end
@@ -237,8 +248,9 @@ s1.MouseButton1Click:Connect(function() task.spawn(function() testSlot(1) end) e
 s2.MouseButton1Click:Connect(function() task.spawn(function() testSlot(2) end) end)
 s3.MouseButton1Click:Connect(function() task.spawn(function() testSlot(3) end) end)
 tapMain.MouseButton1Click:Connect(function() task.spawn(function()
+    playCandidates(true)             -- LOG all candidates first (so we see positions)
     local pb = findPlayButton()
-    if pb then tapButton(pb, 'Mainkan'); local t = tick(); repeat task.wait(0.5) until inGame() or tick() - t > 9; logFn(inGame() and '✓ ENTERED' or '… no load (blackscreen?)', not inGame()) else logFn('Mainkan not visible (center an ALIVE creature first)', true) end
+    if pb then tapButton(pb, 'Mainkan(' .. pb.Name .. ')'); local t = tick(); repeat task.wait(0.5) until inGame() or tick() - t > 9; logFn(inGame() and '✓ ENTERED' or '… no load (blackscreen?)', not inGame()) else logFn('no Mainkan candidate (center an ALIVE creature first)', true) end
 end) end)
 playBtn.MouseButton1Click:Connect(function() task.spawn(playAlive) end)
 saveBtn.MouseButton1Click:Connect(function()
