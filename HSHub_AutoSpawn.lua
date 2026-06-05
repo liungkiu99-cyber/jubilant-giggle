@@ -1,248 +1,309 @@
 --[[
-═══════════════════════════════════════════════════════════════════════
-        HS HUB · AutoSpawn v5  (ALL-IN-ONE, multi-method)
-   Read slots + 3 spawn methods you can test individually + capture the
-   game's REAL spawn call + autonomous loop. Stop guessing — see the truth.
-                    discord.gg/5rpP6faZSJ
-
-   SPAWN METHODS (test each manually, autonomous uses the one you pick):
-     • CLICK  : click the slot's card then the Play button (full game flow,
-                no arg guessing — closest to a real human press)
-     • FIRE   : SpawnRemote:InvokeServer("Slot"..N)   (found remote)
-     • REPLAY : re-send the EXACT call the game made when YOU played manually
-                (this is what worked before). Play one creature once to learn it.
-   When you press the game's own Mainkan, the panel prints the REAL captured
-   arg (e.g. SpawnRemote("Slot1") or whatever it truly is) — that tells us
-   if our slot id is right.
-
-   Slots: SaveSelectionGui > SlotsFrame > "<N>"(numeric) > … > CreatureFrame
-          NameLabel=creature, DeadLabel.Visible=DEAD.  "Default"=template(skip).
-   Test on a THROWAWAY (CoS shadow-bans on a delay).
-═══════════════════════════════════════════════════════════════════════
+    HS HUB · AutoSpawn v6
+    Lobby-based: reads SaveSelectionGui slots → spawns alive → restart+spawn if all dead
+    SAFE: hook never breaks game Mainkan (double-pcall + nil check on original fn)
+    LEARN: press Mainkan once → panel shows exact arg + stores remote object for replay
+    discord.gg/5rpP6faZSJ
 ]]
 
 if shared.__HSHub_AutoSpawn then pcall(function() shared.__HSHub_AutoSpawn:Destroy() end) end
 
-local Players, Workspace, RS = game:GetService('Players'), game:GetService('Workspace'), game:GetService('ReplicatedStorage')
-local LP = Players.LocalPlayer
-local PG = LP:WaitForChild('PlayerGui')
+local Players   = game:GetService('Players')
+local Workspace = game:GetService('Workspace')
+local RS        = game:GetService('ReplicatedStorage')
+local LP        = Players.LocalPlayer
+local PG        = LP:WaitForChild('PlayerGui')
 
 local NAME_SPAWN, NAME_RESTART, NAME_INVIS = 'SpawnRemote', 'RestartSlotRemote', 'ActivateAbility'
-local METHOD = 'CLICK'                 -- CLICK | FIRE | REPLAY  (autonomous spawn method)
 local AUTO_RESPAWN, STEALTH, RUNNING = true, false, false
-local function jit(a, b) return a + math.random() * (b - a) end
-local logFn
+local function jit(a,b) return a + math.random()*(b-a) end
+local logFn -- set later
 
--- ═══════════ remote capture (learn the EXACT call) ═══════════════
-local captured, REPLAYING = {}, false
-local function isRemote(o) return o and (o:IsA('RemoteEvent') or o:IsA('RemoteFunction')) end
-local function searchPlaces(nm)
-    local places = {}
-    pcall(function() local r = LP:FindFirstChild('Remotes'); if r then places[#places+1] = r end end)
-    places[#places+1] = RS; pcall(function() places[#places+1] = LP end)
-    for _, p in ipairs(places) do local o = p:FindFirstChild(nm, true)
-        if isRemote(o) then return o, (o:IsA('RemoteFunction') and 'InvokeServer' or 'FireServer') end end
-end
+-- ═══ SAFE HOOK (capture only, never breaks game) ═════════════════
+local captured = {}
+local REPLAYING = false
+
 pcall(function()
     if not hookfunction then return end
     local cc = checkcaller
-    local function sample(cls) for _, d in ipairs(RS:GetDescendants()) do if d:IsA(cls) then return d end end end
-    local se, sf = sample('RemoteEvent'), sample('RemoteFunction')
-    local function cap(method) return function(self, ...)
-        if not REPLAYING and not (cc and cc()) then
-            local nm = self.Name
-            if nm == NAME_SPAWN or nm == NAME_RESTART or nm == NAME_INVIS then
-                local a = table.pack(...)
-                captured[nm] = { obj = self, method = method, args = a }
-                local s = {}; for i = 1, a.n do s[i] = tostring(a[i]) end
-                if logFn then logFn('✓ LEARNED ' .. nm .. '(' .. table.concat(s, ',') .. ')', false) end
-            end
-        end
-    end end
-    if se then local of; of = hookfunction(se.FireServer, function(self, ...) cap('FireServer')(self, ...); return of(self, ...) end) end
-    if sf then local oi; oi = hookfunction(sf.InvokeServer, function(self, ...) cap('InvokeServer')(self, ...); return oi(self, ...) end) end
+    local function findSample(cls)
+        for _,d in ipairs(RS:GetDescendants()) do if d:IsA(cls) then return d end end
+    end
+
+    -- Hook FireServer (safe for RemoteEvents like Invis)
+    local se = findSample('RemoteEvent')
+    if se then
+        local orig
+        pcall(function()
+            orig = hookfunction(se.FireServer, function(self, ...)
+                local args = table.pack(...)  -- capture BEFORE pcall so ... is in scope
+                pcall(function()
+                    if not REPLAYING and not (cc and cc()) then
+                        local nm = self.Name
+                        if nm==NAME_INVIS or nm==NAME_SPAWN or nm==NAME_RESTART then
+                            captured[nm] = {obj=self, method='FireServer', args=args}
+                            local s={}; for i=1,args.n do s[i]=tostring(args[i]) end
+                            if logFn then logFn('✓ LEARNED '..nm..'('..table.concat(s,',')..')', false) end
+                        end
+                    end
+                end)
+                if orig then return orig(self, table.unpack(args,1,args.n)) end
+            end)
+        end)
+    end
+
+    -- Hook InvokeServer (RemoteFunctions like SpawnRemote) — SAFE version
+    local sf = findSample('RemoteFunction')
+    if sf then
+        local orig
+        pcall(function()
+            orig = hookfunction(sf.InvokeServer, function(self, ...)
+                local args = table.pack(...)  -- capture BEFORE pcall
+                pcall(function()
+                    if not REPLAYING and not (cc and cc()) then
+                        local nm = self.Name
+                        if nm==NAME_SPAWN or nm==NAME_RESTART then
+                            captured[nm] = {obj=self, method='InvokeServer', args=args}
+                            local s={}; for i=1,args.n do s[i]=tostring(args[i]) end
+                            if logFn then logFn('✓ LEARNED '..nm..'('..table.concat(s,',')..')', false) end
+                        end
+                    end
+                end)
+                -- CRITICAL: nil-check, never crash if orig is nil
+                if orig then return orig(self, table.unpack(args,1,args.n)) end
+            end)
+        end)
+    end
 end)
 
--- FIRE: found remote with our own args
-local function fireRemote(nm, ...)
-    local obj, method
-    if captured[nm] then obj, method = captured[nm].obj, captured[nm].method else obj, method = searchPlaces(nm) end
-    if not obj then logFn('✗ ' .. nm .. ' not found', true); return false end
-    local a = table.pack(...); REPLAYING = true
-    local ok, err = pcall(function()
-        if method == 'InvokeServer' then return obj:InvokeServer(table.unpack(a, 1, a.n)) else obj:FireServer(table.unpack(a, 1, a.n)) end
-    end); REPLAYING = false
-    logFn((ok and '→ FIRE ' or '✗ FIRE ') .. nm .. '(' .. table.concat({ ... }, ',') .. ')' .. (ok and '' or (' ' .. tostring(err):sub(1, 35))), not ok)
-    return ok
-end
--- REPLAY: exact captured call
-local function replayRemote(nm)
-    local c = captured[nm]; if not c then logFn('✗ no capture for ' .. nm .. ' (play once)', true); return false end
-    REPLAYING = true
-    local ok = pcall(function()
-        if c.method == 'InvokeServer' then return c.obj:InvokeServer(table.unpack(c.args, 1, c.args.n)) else c.obj:FireServer(table.unpack(c.args, 1, c.args.n)) end
-    end); REPLAYING = false
-    logFn(ok and ('→ REPLAY ' .. nm) or ('✗ REPLAY ' .. nm), not ok)
-    return ok
-end
-
--- ═══════════ CLICK a GUI button (firesignal / getconnections) ════
-local function clickGui(btn)
-    if not btn then return false end
-    local fired = false
-    local evs = {}
-    for _, e in ipairs({ 'MouseButton1Click', 'Activated', 'MouseButton1Down', 'MouseButton1Up' }) do
-        local ok, sig = pcall(function() return btn[e] end); if ok and sig then evs[#evs + 1] = sig end
+-- ═══ FIND REMOTE (search everywhere) ════════════════════════════
+local function findRemote(nm)
+    -- 1. use captured (proven to work: exact object from game's own call)
+    if captured[nm] then return captured[nm].obj, captured[nm].method end
+    -- 2. LP.Remotes folder (CoS keeps remotes here)
+    local lpR = LP:FindFirstChild('Remotes')
+    if lpR then
+        local o = lpR:FindFirstChild(nm, true)
+        if o then return o, (o:IsA('RemoteFunction') and 'InvokeServer' or 'FireServer') end
     end
-    for _, sig in ipairs(evs) do if firesignal then pcall(function() firesignal(sig); fired = true end) end end
-    if getconnections then for _, sig in ipairs(evs) do pcall(function()
-        for _, c in ipairs(getconnections(sig)) do
-            if c.Fire then c:Fire(); fired = true elseif c.Function then pcall(c.Function); fired = true end
-        end
-    end) end end
-    return fired
+    -- 3. RS recursive
+    local o = RS:FindFirstChild(nm, true)
+    if o then return o, (o:IsA('RemoteFunction') and 'InvokeServer' or 'FireServer') end
+    -- 4. LP recursive
+    local o2 = LP:FindFirstChild(nm, true)
+    if o2 then return o2, (o2:IsA('RemoteFunction') and 'InvokeServer' or 'FireServer') end
+    return nil, nil
 end
 
--- ═══════════ slots ═══════════════════════════════════════════════
-local function findSaveGui()
-    for _, r in ipairs({ PG, (gethui and gethui()) or PG }) do local g = r:FindFirstChild('SaveSelectionGui'); if g then return g end end
+local function callRemote(nm, ...)
+    local obj, method = findRemote(nm)
+    if not obj then logFn('✗ '..nm..' not found anywhere', true); return false end
+    local src = captured[nm] and 'replay' or 'found'
+    local a = table.pack(...)           -- capture varargs BEFORE pcall
+    local astr = table.concat({...},',')
+    REPLAYING = true
+    local ok, err = pcall(function()
+        if method == 'InvokeServer' then return obj:InvokeServer(table.unpack(a,1,a.n))
+        else obj:FireServer(table.unpack(a,1,a.n)) end
+    end)
+    REPLAYING = false
+    logFn((ok and '→ ' or '✗ ')..nm..'('..astr..') ['..src..']', not ok)
+    if not ok then logFn('  err: '..tostring(err):sub(1,60), true) end
+    return ok
 end
-local function globalPlayBtn()
-    local gui = findSaveGui(); if not gui then return nil end
-    for _, d in ipairs(gui:GetDescendants()) do
-        if d.Name == 'PlayButton' and (d:IsA('ImageButton') or d:IsA('TextButton')) then return d end
+
+-- ═══ SPAWN via REPLAY (uses captured exact args) ═════════════════
+local function replaySpawn()
+    local c = captured[NAME_SPAWN]
+    if not c then return false, 'not learned yet' end
+    REPLAYING = true
+    local ok, err = pcall(function()
+        if c.method == 'InvokeServer' then return c.obj:InvokeServer(table.unpack(c.args,1,c.args.n))
+        else c.obj:FireServer(table.unpack(c.args,1,c.args.n)) end
+    end)
+    REPLAYING = false
+    logFn((ok and '→ REPLAY SpawnRemote' or '✗ REPLAY SpawnRemote '..tostring(err):sub(1,40)), not ok)
+    return ok
+end
+
+-- ═══ READ LOBBY SLOTS ════════════════════════════════════════════
+local function findSaveGui()
+    for _,r in ipairs({PG, gethui and gethui() or PG}) do
+        local g = r:FindFirstChild('SaveSelectionGui'); if g then return g end
     end
 end
 local function readSlots()
-    local out = {}; local gui = findSaveGui(); if not gui then return out end
-    local slotsFrame; for _, d in ipairs(gui:GetDescendants()) do if d.Name == 'SlotsFrame' then slotsFrame = d; break end end
-    if not slotsFrame then return out end
-    for _, sf in ipairs(slotsFrame:GetChildren()) do
-        local n = tonumber(sf.Name)
+    local out = {}
+    local gui = findSaveGui(); if not gui then return out end
+    local sf; for _,d in ipairs(gui:GetDescendants()) do if d.Name=='SlotsFrame' then sf=d; break end end
+    if not sf then return out end
+    for _,child in ipairs(sf:GetChildren()) do
+        local n = tonumber(child.Name)  -- only numeric children (skip "Default" template)
         if n then
-            local cf = sf:FindFirstChild('CreatureFrame', true)
+            local cf = child:FindFirstChild('CreatureFrame',true)
             local nm, dead = '?', false
             if cf then
-                local nameL, deadL, rb = cf:FindFirstChild('NameLabel'), cf:FindFirstChild('DeadLabel'), cf:FindFirstChild('RestartButton')
+                local nameL = cf:FindFirstChild('NameLabel')
+                local deadL = cf:FindFirstChild('DeadLabel')
+                local restB = cf:FindFirstChild('RestartButton')
                 if nameL then nm = nameL.Text end
-                dead = (deadL and deadL.Visible == true) or (rb and rb.Visible == true) or false
+                dead = (deadL and deadL.Visible==true) or (restB and restB.Visible==true) or false
             end
-            out[#out + 1] = { slot = 'Slot' .. n, n = n, name = nm, dead = dead, cf = cf }
+            out[#out+1] = {slot='Slot'..n, n=n, name=nm, dead=dead}
         end
     end
-    table.sort(out, function(a, b) return a.n < b.n end)
+    table.sort(out, function(a,b) return a.n<b.n end)
     return out
 end
+
 local function inGame()
     local chars = Workspace:FindFirstChild('Characters')
     return chars and (chars:FindFirstChild(LP.Name) or chars:FindFirstChild(LP.DisplayName)) and true or false
 end
 
--- ═══════════ spawn one slot via the chosen METHOD ════════════════
-local function clickSpawn(s)
-    -- select the card, then press the global Play button
-    local sel = s.cf and (s.cf:FindFirstChild('ViewButton') or s.cf)
-    logFn('CLICK select ' .. s.slot .. ' (' .. s.name .. ')')
-    clickGui(sel); task.wait(0.6)
-    local pb = globalPlayBtn()
-    if pb then logFn('CLICK Play button'); clickGui(pb) else logFn('✗ Play button not found', true) end
-end
-local function spawnSlot(s)
-    if METHOD == 'CLICK' then clickSpawn(s)
-    elseif METHOD == 'REPLAY' then replayRemote(NAME_SPAWN)
-    else fireRemote(NAME_SPAWN, s.slot) end
-    task.wait(jit(2.5, 4.0))
-    if STEALTH then fireRemote(NAME_INVIS, 'Invisibility') end
-end
-local function restartSlot(s)
-    -- click the card's RestartButton if present, else fire
-    local rb = s.cf and s.cf:FindFirstChild('RestartButton')
-    if METHOD == 'CLICK' and rb then logFn('CLICK Restart ' .. s.slot); clickGui(s.cf:FindFirstChild('ViewButton') or s.cf); task.wait(0.4); clickGui(rb)
-    else fireRemote(NAME_RESTART, s.slot, false) end
-    task.wait(jit(1.0, 2.0))
-end
-local function pickAndSpawn()
-    local slots = readSlots()
-    if #slots == 0 then logFn('no slots read', true); return end
-    local alive; for _, s in ipairs(slots) do if not s.dead then alive = s; break end end
-    if alive then spawnSlot(alive)
-    else local s = slots[1]; logFn('all DEAD → restart+spawn ' .. s.slot); restartSlot(s); spawnSlot(s) end
+-- ═══ SPAWN SEQUENCE ══════════════════════════════════════════════
+local function waitForSpawn(timeout)
+    local t = tick()
+    repeat task.wait(0.5) until inGame() or tick()-t > timeout
+    return inGame()
 end
 
--- ═══════════ loop ════════════════════════════════════════════════
+local function doSpawn(slot)
+    -- try replay first (most reliable), fall back to fire
+    local ok
+    if captured[NAME_SPAWN] then
+        ok = replaySpawn()
+    else
+        ok = callRemote(NAME_SPAWN, slot)
+    end
+    if ok then
+        logFn('waiting for load...')
+        waitForSpawn(6)
+        if STEALTH then task.wait(0.5); callRemote(NAME_INVIS,'Invisibility') end
+    end
+    return ok
+end
+
+local function doRestart(slot)
+    callRemote(NAME_RESTART, slot, false)
+    task.wait(jit(1.0,2.0))
+end
+
+-- ═══ MAIN LOOP ═══════════════════════════════════════════════════
 local busy = false
 task.spawn(function()
-    while true do task.wait(1.2)
+    while true do
+        task.wait(1.5)
         if RUNNING and not busy and not inGame() then
-            busy = true; pcall(pickAndSpawn); task.wait(jit(2.5, 4.0)); busy = false
+            busy = true
+            local slots = readSlots()
+            if #slots > 0 then
+                local alive
+                for _,s in ipairs(slots) do if not s.dead then alive=s; break end end
+                if alive then
+                    logFn('ALIVE: '..alive.slot..' '..alive.name)
+                    doSpawn(alive.slot)
+                else
+                    local s = slots[1]
+                    logFn('all DEAD → restart+spawn '..s.slot)
+                    doRestart(s.slot)
+                    doSpawn(s.slot)
+                end
+            else
+                logFn('no slots read (lobby not loaded yet)', true)
+            end
+            task.wait(jit(2.0,3.5))
+            busy = false
         end
     end
 end)
 
--- ═══════════ UI ══════════════════════════════════════════════════
-local gui = Instance.new('ScreenGui'); gui.Name = 'HSHub_AutoSpawn_' .. math.random(1e5, 1e6 - 1)
-gui.ResetOnSpawn = false; gui.IgnoreGuiInset = true; gui.Parent = (gethui and gethui()) or PG
+-- ═══ UI ══════════════════════════════════════════════════════════
+local gui = Instance.new('ScreenGui'); gui.Name='HSHub_AutoSpawn_'..math.random(1e5,1e6)
+gui.ResetOnSpawn=false; gui.IgnoreGuiInset=true; gui.Parent=(gethui and gethui()) or PG
 shared.__HSHub_AutoSpawn = gui
-local frame = Instance.new('Frame', gui); frame.Size = UDim2.new(0, 410, 0, 476); frame.Position = UDim2.new(0, 20, 0.5, -238)
-frame.BackgroundColor3 = Color3.fromRGB(18, 20, 28); frame.BorderSizePixel = 0; frame.Active = true; frame.Draggable = true
-Instance.new('UICorner', frame).CornerRadius = UDim.new(0, 10); Instance.new('UIStroke', frame).Color = Color3.fromRGB(150, 110, 220)
-local header = Instance.new('Frame', frame); header.Size = UDim2.new(1, 0, 0, 40); header.BackgroundColor3 = Color3.fromRGB(120, 90, 200); header.BorderSizePixel = 0
-Instance.new('UICorner', header).CornerRadius = UDim.new(0, 10)
-local title = Instance.new('TextLabel', header); title.BackgroundTransparency = 1; title.Size = UDim2.new(1, -50, 1, 0); title.Position = UDim2.new(0, 12, 0, 0)
-title.Font = Enum.Font.GothamBold; title.TextSize = 15; title.TextColor3 = Color3.fromRGB(245, 245, 250); title.TextXAlignment = Enum.TextXAlignment.Left; title.Text = 'HS HUB · AutoSpawn v5'
-local closeBtn = Instance.new('TextButton', header); closeBtn.BackgroundTransparency = 1; closeBtn.Size = UDim2.new(0, 36, 0, 36); closeBtn.Position = UDim2.new(1, -40, 0, 2)
-closeBtn.Font = Enum.Font.GothamBold; closeBtn.TextSize = 22; closeBtn.TextColor3 = Color3.fromRGB(245, 245, 250); closeBtn.Text = '×'
-closeBtn.MouseButton1Click:Connect(function() RUNNING = false; gui:Destroy(); shared.__HSHub_AutoSpawn = nil end)
-local function B(label, color, x, w, y)
-    local b = Instance.new('TextButton', frame); b.Size = UDim2.new(0, w, 0, 28); b.Position = UDim2.new(0, x, 0, y); b.BackgroundColor3 = color; b.BorderSizePixel = 0
-    b.Font = Enum.Font.GothamBold; b.TextSize = 11; b.TextColor3 = Color3.fromRGB(245, 245, 250); b.Text = label; Instance.new('UICorner', b).CornerRadius = UDim.new(0, 6); return b
-end
-local readBtn = B('🔍 Read Slots', Color3.fromRGB(70, 150, 200), 10, 130, 48)
-local sClick = B('▶ Spawn CLICK', Color3.fromRGB(60, 140, 150), 146, 124, 48)
-local sFire  = B('▶ Spawn FIRE',  Color3.fromRGB(70, 120, 180), 276, 124, 48)
-local sReplay = B('▶ Spawn REPLAY', Color3.fromRGB(90, 110, 170), 10, 130, 82)
-local restartBtn = B('↻ Restart', Color3.fromRGB(150, 110, 70), 146, 124, 82)
-local invisBtn = B('👻 Invis', Color3.fromRGB(110, 90, 200), 276, 124, 82)
--- method selector
-local methodBtn = B('Method: CLICK', Color3.fromRGB(80, 90, 110), 10, 130, 116)
-methodBtn.MouseButton1Click:Connect(function()
-    METHOD = (METHOD == 'CLICK' and 'FIRE') or (METHOD == 'FIRE' and 'REPLAY') or 'CLICK'
-    methodBtn.Text = 'Method: ' .. METHOD
-end)
-local function T(label, x, init, cb)
-    local b = B(label .. ':OFF', Color3.fromRGB(70, 74, 88), x, 124, 116); local s = init
-    local function paint() b.BackgroundColor3 = s and Color3.fromRGB(70, 150, 110) or Color3.fromRGB(70, 74, 88); b.Text = label .. ':' .. (s and 'ON' or 'OFF') end
-    paint(); b.MouseButton1Click:Connect(function() s = not s; paint(); cb(s) end)
-end
-T('AutoResp', 146, AUTO_RESPAWN, function(s) AUTO_RESPAWN = s end)
-T('Stealth', 276, STEALTH, function(s) STEALTH = s end)
-local startBtn = B('▶ START', Color3.fromRGB(60, 150, 100), 10, 195, 150); startBtn.Size = UDim2.new(0, 195, 0, 30)
-local stopBtn  = B('■ STOP', Color3.fromRGB(160, 80, 80), 213, 187, 150); stopBtn.Size = UDim2.new(0, 187, 0, 30)
 
-local scroll = Instance.new('ScrollingFrame', frame); scroll.Size = UDim2.new(1, -18, 0, 280); scroll.Position = UDim2.new(0, 9, 0, 188)
-scroll.BackgroundColor3 = Color3.fromRGB(12, 14, 20); scroll.BorderSizePixel = 0; scroll.ScrollBarThickness = 4; scroll.ScrollBarImageColor3 = Color3.fromRGB(150, 110, 220)
-Instance.new('UICorner', scroll).CornerRadius = UDim.new(0, 6)
-local lay = Instance.new('UIListLayout', scroll); lay.Padding = UDim.new(0, 2); lay.SortOrder = Enum.SortOrder.LayoutOrder
-local lpd = Instance.new('UIPadding', scroll); lpd.PaddingTop = UDim.new(0, 4); lpd.PaddingLeft = UDim.new(0, 6)
-logFn = function(text, isErr)
-    local lbl = Instance.new('TextLabel', scroll); lbl.BackgroundTransparency = 1; lbl.Size = UDim2.new(1, -12, 0, 15); lbl.LayoutOrder = #scroll:GetChildren()
-    lbl.Font = Enum.Font.Code; lbl.TextSize = 11; lbl.TextColor3 = isErr and Color3.fromRGB(255, 140, 140) or Color3.fromRGB(185, 215, 235)
-    lbl.TextXAlignment = Enum.TextXAlignment.Left; lbl.TextTruncate = Enum.TextTruncate.AtEnd; lbl.Text = text
-    scroll.CanvasSize = UDim2.new(0, 0, 0, #scroll:GetChildren() * 17); scroll.CanvasPosition = Vector2.new(0, scroll.CanvasSize.Y.Offset)
+local frame = Instance.new('Frame',gui)
+frame.Size=UDim2.new(0,400,0,440); frame.Position=UDim2.new(0,20,0.5,-220)
+frame.BackgroundColor3=Color3.fromRGB(18,20,28); frame.BorderSizePixel=0; frame.Active=true; frame.Draggable=true
+Instance.new('UICorner',frame).CornerRadius=UDim.new(0,10)
+Instance.new('UIStroke',frame).Color=Color3.fromRGB(140,100,220)
+
+local hdr=Instance.new('Frame',frame); hdr.Size=UDim2.new(1,0,0,40); hdr.BackgroundColor3=Color3.fromRGB(110,80,190); hdr.BorderSizePixel=0
+Instance.new('UICorner',hdr).CornerRadius=UDim.new(0,10)
+local ttl=Instance.new('TextLabel',hdr); ttl.BackgroundTransparency=1; ttl.Size=UDim2.new(1,-48,1,0); ttl.Position=UDim2.new(0,12,0,0)
+ttl.Font=Enum.Font.GothamBold; ttl.TextSize=15; ttl.TextColor3=Color3.fromRGB(245,245,250); ttl.TextXAlignment=Enum.TextXAlignment.Left; ttl.Text='HS HUB · AutoSpawn v6'
+local xBtn=Instance.new('TextButton',hdr); xBtn.BackgroundTransparency=1; xBtn.Size=UDim2.new(0,36,0,36); xBtn.Position=UDim2.new(1,-40,0,2)
+xBtn.Font=Enum.Font.GothamBold; xBtn.TextSize=22; xBtn.TextColor3=Color3.fromRGB(255,255,255); xBtn.Text='×'
+xBtn.MouseButton1Click:Connect(function() RUNNING=false; gui:Destroy(); shared.__HSHub_AutoSpawn=nil end)
+
+local function mkBtn(lbl,col,x,w,y)
+    local b=Instance.new('TextButton',frame); b.Size=UDim2.new(0,w,0,28); b.Position=UDim2.new(0,x,0,y)
+    b.BackgroundColor3=col; b.BorderSizePixel=0; b.Font=Enum.Font.GothamBold; b.TextSize=11; b.TextColor3=Color3.fromRGB(245,245,250); b.Text=lbl
+    Instance.new('UICorner',b).CornerRadius=UDim.new(0,6); return b
 end
-logFn('v5. Tap a creature\'s Mainkan ONCE → I print its REAL arg.')
-logFn('Then test Spawn CLICK / FIRE / REPLAY to see which works.')
+local function mkTgl(lbl,x,init,cb)
+    local b=mkBtn(lbl..':OFF',Color3.fromRGB(70,74,88),x,122,116); local s=init
+    local function paint() b.BackgroundColor3=s and Color3.fromRGB(70,150,110) or Color3.fromRGB(70,74,88); b.Text=lbl..':'..(s and 'ON' or 'OFF') end
+    paint(); b.MouseButton1Click:Connect(function() s=not s; paint(); cb(s) end)
+end
+
+local readBtn    = mkBtn('🔍 Read Slots',   Color3.fromRGB(60,130,190),  10,126, 48)
+local spawnBtn   = mkBtn('▶ Spawn now',     Color3.fromRGB(60,140,120), 140,120, 48)
+local restartBtn = mkBtn('↻ Restart now',   Color3.fromRGB(140,100,60), 264,126, 48)
+local invisBtn   = mkBtn('👻 Invis now',    Color3.fromRGB(100,80,190),  10,126, 82)
+local learnInfo  = Instance.new('TextLabel',frame); learnInfo.BackgroundTransparency=1
+learnInfo.Size=UDim2.new(1,-20,0,14); learnInfo.Position=UDim2.new(0,10,0,82+28+2)
+learnInfo.Font=Enum.Font.Code; learnInfo.TextSize=10; learnInfo.TextColor3=Color3.fromRGB(200,200,140)
+learnInfo.TextXAlignment=Enum.TextXAlignment.Left; learnInfo.Text='Spawn learned: NO  Restart: NO  Invis: NO'
+mkTgl('AutoResp', 140, AUTO_RESPAWN, function(s) AUTO_RESPAWN=s end)
+mkTgl('Stealth',  266, STEALTH,      function(s) STEALTH=s end)
+local startBtn = mkBtn('▶ START',Color3.fromRGB(60,150,100), 10,190,150); startBtn.Size=UDim2.new(0,190,0,30)
+local stopBtn  = mkBtn('■ STOP', Color3.fromRGB(160,80,80), 208,182,150); stopBtn.Size=UDim2.new(0,182,0,30)
+
+local scroll=Instance.new('ScrollingFrame',frame); scroll.Size=UDim2.new(1,-18,0,252); scroll.Position=UDim2.new(0,9,0,188)
+scroll.BackgroundColor3=Color3.fromRGB(11,13,19); scroll.BorderSizePixel=0; scroll.ScrollBarThickness=4
+scroll.ScrollBarImageColor3=Color3.fromRGB(140,100,220)
+Instance.new('UICorner',scroll).CornerRadius=UDim.new(0,6)
+local ll=Instance.new('UIListLayout',scroll); ll.Padding=UDim.new(0,2); ll.SortOrder=Enum.SortOrder.LayoutOrder
+local lp=Instance.new('UIPadding',scroll); lp.PaddingTop=UDim.new(0,4); lp.PaddingLeft=UDim.new(0,6)
+
+logFn = function(txt,isErr)
+    local lb=Instance.new('TextLabel',scroll); lb.BackgroundTransparency=1; lb.Size=UDim2.new(1,-12,0,15); lb.LayoutOrder=#scroll:GetChildren()
+    lb.Font=Enum.Font.Code; lb.TextSize=11; lb.TextColor3=isErr and Color3.fromRGB(255,140,140) or Color3.fromRGB(185,215,235)
+    lb.TextXAlignment=Enum.TextXAlignment.Left; lb.TextTruncate=Enum.TextTruncate.AtEnd; lb.Text=txt
+    scroll.CanvasSize=UDim2.new(0,0,0,#scroll:GetChildren()*17); scroll.CanvasPosition=Vector2.new(0,scroll.CanvasSize.Y.Offset)
+    -- update learn status
+    learnInfo.Text=('Spawn:%s  Restart:%s  Invis:%s'):format(
+        captured[NAME_SPAWN] and 'YES✓' or 'no', captured[NAME_RESTART] and 'YES✓' or 'no', captured[NAME_INVIS] and 'YES✓' or 'no')
+end
+
+logFn('v6. First: press Mainkan on ONE creature → hook learns the exact call.')
+logFn('Then: Spawn now (uses learned call). No blackscreen issue.')
 
 readBtn.MouseButton1Click:Connect(function()
-    local slots = readSlots()
-    logFn(('── slots (in_game=%s, %d) play_btn=%s ──'):format(tostring(inGame()), #slots, globalPlayBtn() and 'ok' or 'MISSING'), Color3.fromRGB(120, 220, 255))
-    for _, s in ipairs(slots) do logFn(('  %s %s %s'):format(s.slot, s.name, s.dead and 'DEAD' or 'ALIVE'), s.dead and Color3.fromRGB(255, 140, 140) or Color3.fromRGB(150, 230, 150)) end
+    local slots=readSlots()
+    logFn(('── slots: in_game=%s  found=%d ──'):format(tostring(inGame()),#slots),Color3.fromRGB(120,210,255))
+    if #slots==0 then logFn('  NONE (is the lobby/select screen loaded?)',true) end
+    for _,s in ipairs(slots) do logFn(('  %s %s %s'):format(s.slot,s.name,s.dead and 'DEAD' or 'ALIVE'), s.dead and Color3.fromRGB(255,140,140) or Color3.fromRGB(150,230,150)) end
 end)
-local function manualSpawn(m) local old = METHOD; METHOD = m; task.spawn(function() pcall(pickAndSpawn); METHOD = old end) end
-sClick.MouseButton1Click:Connect(function() manualSpawn('CLICK') end)
-sFire.MouseButton1Click:Connect(function() manualSpawn('FIRE') end)
-sReplay.MouseButton1Click:Connect(function() replayRemote(NAME_SPAWN) end)
-restartBtn.MouseButton1Click:Connect(function() local sl = readSlots(); if sl[1] then restartSlot(sl[1]) end end)
-invisBtn.MouseButton1Click:Connect(function() fireRemote(NAME_INVIS, 'Invisibility') end)
-startBtn.MouseButton1Click:Connect(function() if RUNNING then return end RUNNING = true; busy = false; logFn('STARTED method=' .. METHOD .. ' respawn=' .. tostring(AUTO_RESPAWN)) end)
-stopBtn.MouseButton1Click:Connect(function() RUNNING = false; busy = false; logFn('STOPPED.') end)
+spawnBtn.MouseButton1Click:Connect(function()
+    local slots=readSlots(); local target=nil
+    for _,s in ipairs(slots) do if not s.dead then target=s; break end end
+    if not target and #slots>0 then target=slots[1] end
+    if target then task.spawn(function() doSpawn(target.slot) end)
+    else logFn('no slot found — read slots first',true) end
+end)
+restartBtn.MouseButton1Click:Connect(function()
+    local slots=readSlots()
+    if slots[1] then task.spawn(function() doRestart(slots[1].slot) end)
+    else logFn('no slot found',true) end
+end)
+invisBtn.MouseButton1Click:Connect(function() callRemote(NAME_INVIS,'Invisibility') end)
+startBtn.MouseButton1Click:Connect(function()
+    if RUNNING then return end
+    RUNNING=true; busy=false
+    logFn(('STARTED. AutoResp=%s Stealth=%s'):format(tostring(AUTO_RESPAWN),tostring(STEALTH)))
+    if not captured[NAME_SPAWN] then logFn('⚠ Spawn not learned yet — press Mainkan once first!',true) end
+end)
+stopBtn.MouseButton1Click:Connect(function() RUNNING=false; busy=false; logFn('STOPPED.') end)
