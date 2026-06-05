@@ -131,47 +131,43 @@ local function lobbyReady()
     return ok
 end
 
--- ═══ TAP a button, verify a state change (KL multi-offset) ═══════
--- verify(): returns true when the tap succeeded. waitPer = seconds to wait per offset.
-local function smartTap(btn, label, verify, waitPer)
+-- ═══ SINGLE tap at the proven offset (mobile=0, PC=+inset). NO multi-tap spam
+--     (multi-tap during slow loading = double-spawn = blackscreen). ═══
+local function tapButton(btn, label)
     if not btn then logFn('tap nil: ' .. tostring(label), true); return false end
-    waitPer = waitPer or 0.5
-    -- 1) event-fire
-    fireGuiButton(btn); task.wait(waitPer)
-    if verify and verify() then logFn('✓ ' .. label .. ' (event)'); return true end
-    if not verify then end
-    -- 2) VIM tap
     local rx, ry = centerOf(btn)
-    local offsets
-    if IS_PC then offsets = { GUI_INSET.Y }
-    elseif learnedOff then offsets = { learnedOff }
-    else offsets = { 0, -GUI_INSET.Y, GUI_INSET.Y } end
-    for _, off in ipairs(offsets) do
-        logFn(('tap %s @(%d,%d) off=%d'):format(label, math.floor(rx), math.floor(ry + off), math.floor(off)))
-        clickHidden(rx, ry + off)
-        if not verify then return true end
-        local t = tick(); repeat task.wait(0.4) until verify() or tick() - t > waitPer
-        if verify() then if not IS_PC then learnedOff = off end logFn('✓ ' .. label .. ' (off=' .. math.floor(off) .. ')'); return true end
-    end
-    if verify then logFn('✗ ' .. label .. ' failed (all offsets)', true) end
-    return false
+    local off = IS_PC and GUI_INSET.Y or (learnedOff or 0)
+    logFn(('tap %s @(%d,%d) off=%d'):format(label, math.floor(rx), math.floor(ry + off), math.floor(off)))
+    clickHidden(rx, ry + off)
+    return true
 end
 
--- ═══ PLAY ════════════════════════════════════════════════════════
-local function selectCard(s)
-    if not s.card then return end
-    smartTap(s.card:FindFirstChild('ViewButton') or s.card, 'select ' .. s.slot, nil, 0.3)
-end
-local function playSlot(s)
-    selectCard(s); task.wait(0.7)
-    local pb = findPlayButton()
-    return smartTap(pb, 'Mainkan', inGame, 3)
-end
+-- ═══ PLAY: only ever play an ALIVE creature ══════════════════════
+-- Mainkan only appears for the CENTERED + ALIVE creature (dead shows "Mulai ulang").
+-- So we select an alive card, then require the Mainkan button to be visible before tapping.
 local function playAlive()
-    local slots = readSlots(); if #slots == 0 then logFn('no slots', true); return false end
-    local tgt; for _, s in ipairs(slots) do if not s.dead then tgt = s; break end end
-    if not tgt then logFn('all DEAD (restart TODO)', true); return false end
-    logFn('play ' .. tgt.slot .. ' (' .. tgt.name .. ')'); return playSlot(tgt)
+    if inGame() then return true end
+    local slots = readSlots()
+    local aliveList = {}
+    for _, s in ipairs(slots) do if not s.dead then aliveList[#aliveList + 1] = s end end
+    if #aliveList == 0 then logFn('no ALIVE creature — all dead (restart TODO)', true); return false end
+    for _, tgt in ipairs(aliveList) do
+        logFn('select ' .. tgt.slot .. ' (' .. tgt.name .. ')')
+        tapButton(tgt.card and (tgt.card:FindFirstChild('ViewButton') or tgt.card), 'select ' .. tgt.slot)
+        task.wait(0.9)
+        local pb = findPlayButton()      -- visible Mainkan = an ALIVE creature is centered
+        if pb then
+            tapButton(pb, 'Mainkan ' .. tgt.name)
+            local t = tick(); repeat task.wait(0.5) until inGame() or tick() - t > 9   -- single tap, long wait (no respam)
+            if inGame() then logFn('✓ ENTERED GAME (' .. tgt.name .. ')'); return true end
+            logFn('✗ tapped Mainkan but no load in 9s (blackscreen?) — stopping, NOT respamming', true)
+            return false
+        else
+            logFn('  ' .. tgt.slot .. ': Mainkan not visible (not centered/playable) → next', true)
+        end
+    end
+    logFn('no alive creature became playable', true)
+    return false
 end
 
 local busy = false
@@ -236,12 +232,13 @@ readBtn.MouseButton1Click:Connect(function()
     logFn(('── slots:%d in_game=%s PlayBtn=%s ──'):format(#slots, tostring(inGame()), findPlayButton() and 'found' or 'MISSING'), Color3.fromRGB(120, 210, 255))
     for _, s in ipairs(slots) do logFn(('  %s %s %s'):format(s.slot, s.name, s.dead and 'DEAD' or 'ALIVE'), s.dead and Color3.fromRGB(255, 140, 140) or Color3.fromRGB(150, 230, 150)) end
 end)
-local function testSlot(n) local s = slotByN(n); if s and s.card then smartTap(s.card:FindFirstChild('ViewButton') or s.card, 'Slot' .. n .. '(' .. s.name .. ')', nil, 0.3) else logFn('slot ' .. n .. ' not found', true) end end
+local function testSlot(n) local s = slotByN(n); if s and s.card then tapButton(s.card:FindFirstChild('ViewButton') or s.card, 'Slot' .. n .. '(' .. s.name .. ')') else logFn('slot ' .. n .. ' not found', true) end end
 s1.MouseButton1Click:Connect(function() task.spawn(function() testSlot(1) end) end)
 s2.MouseButton1Click:Connect(function() task.spawn(function() testSlot(2) end) end)
 s3.MouseButton1Click:Connect(function() task.spawn(function() testSlot(3) end) end)
 tapMain.MouseButton1Click:Connect(function() task.spawn(function()
-    local pb = findPlayButton(); if pb then smartTap(pb, 'Mainkan', inGame, 3) else logFn('Mainkan MISSING', true) end
+    local pb = findPlayButton()
+    if pb then tapButton(pb, 'Mainkan'); local t = tick(); repeat task.wait(0.5) until inGame() or tick() - t > 9; logFn(inGame() and '✓ ENTERED' or '… no load (blackscreen?)', not inGame()) else logFn('Mainkan not visible (center an ALIVE creature first)', true) end
 end) end)
 playBtn.MouseButton1Click:Connect(function() task.spawn(playAlive) end)
 saveBtn.MouseButton1Click:Connect(function()
