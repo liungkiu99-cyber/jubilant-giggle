@@ -23,6 +23,7 @@ local AUTO = false
 local logFn
 local logLines = {}
 local learnedOff = nil   -- the VIM Y offset that worked (mobile)
+local panelGui = nil     -- our ScreenGui (hidden during taps so it never blocks them)
 
 -- ═══ platform + input primitives (from King Legacy) ══════════════
 local IS_MOBILE, IS_PC, IS_IOS, IS_POTASSIUM = false, false, false, false
@@ -47,6 +48,13 @@ local function vimClick(x, y)
     if IS_PC then if VIM then vimMouse(x, y) elseif IS_POTASSIUM then potClick(x, y) end
     else vimMouse(x, y); task.wait(0.1); vimTouch(x, y) end
 end
+-- tap, hiding our panel so it never intercepts the touch (the panel covers part of screen)
+local function clickHidden(x, y)
+    local was = panelGui and panelGui.Enabled
+    if panelGui then panelGui.Enabled = false; task.wait(0.05) end
+    vimClick(x, y)
+    if panelGui then task.wait(0.05); panelGui.Enabled = was end
+end
 local function fireGuiButton(btn)
     if not btn then return end
     pcall(function() if typeof(firesignal) == 'function' then firesignal(btn.MouseButton1Click); firesignal(btn.Activated); return end end)
@@ -59,15 +67,38 @@ local function centerOf(b) local ap, as = b.AbsolutePosition, b.AbsoluteSize; re
 local function findSaveGui()
     for _, r in ipairs({ PG, gethui and gethui() or PG }) do local g = r:FindFirstChild('SaveSelectionGui'); if g then return g end end
 end
+local function visibleChain(o)
+    local n = o
+    while n and n:IsA('GuiObject') do if not n.Visible then return false end n = n.Parent end
+    return true
+end
+-- find the VISIBLE Mainkan/Play button (the green one on the centered card),
+-- NOT the hidden global PlayButton. Match by text, require visible ancestor chain.
+local PLAY_TEXTS = { ['Mainkan'] = true, ['MAINKAN'] = true, ['Play'] = true, ['PLAY'] = true }
 local function findPlayButton()
-    local gui = findSaveGui(); if not gui then return nil end
-    local fb
-    for _, d in ipairs(gui:GetDescendants()) do
-        if d.Name == 'PlayButton' and (d:IsA('ImageButton') or d:IsA('TextButton')) then
-            fb = fb or d; local p = d.Parent; while p and p ~= gui do if p.Name == 'ButtonsFrame' then return d end p = p.Parent end
+    for _, gname in ipairs({ 'SaveSelectionGui', 'SlotOverlayGui' }) do
+        for _, r in ipairs({ PG, gethui and gethui() or PG }) do
+            local g = r:FindFirstChild(gname)
+            if g then
+                for _, d in ipairs(g:GetDescendants()) do
+                    if d:IsA('TextLabel') and PLAY_TEXTS[d.Text] then
+                        -- walk up to the clickable, visible ancestor
+                        local n = d
+                        while n and n ~= g do
+                            if (n:IsA('ImageButton') or n:IsA('TextButton')) and visibleChain(n) then return n end
+                            n = n.Parent
+                        end
+                    end
+                end
+            end
         end
     end
-    return fb
+    -- fallback: any visible PlayButton-named clickable
+    local g = findSaveGui()
+    if g then for _, d in ipairs(g:GetDescendants()) do
+        if d.Name == 'PlayButton' and (d:IsA('ImageButton') or d:IsA('TextButton')) and visibleChain(d) then return d end
+    end end
+    return nil
 end
 local function readSlots()
     local out = {}; local gui = findSaveGui(); if not gui then return out end
@@ -117,7 +148,7 @@ local function smartTap(btn, label, verify, waitPer)
     else offsets = { 0, -GUI_INSET.Y, GUI_INSET.Y } end
     for _, off in ipairs(offsets) do
         logFn(('tap %s @(%d,%d) off=%d'):format(label, math.floor(rx), math.floor(ry + off), math.floor(off)))
-        vimClick(rx, ry + off)
+        clickHidden(rx, ry + off)
         if not verify then return true end
         local t = tick(); repeat task.wait(0.4) until verify() or tick() - t > waitPer
         if verify() then if not IS_PC then learnedOff = off end logFn('✓ ' .. label .. ' (off=' .. math.floor(off) .. ')'); return true end
@@ -157,7 +188,7 @@ end)
 -- ═══ UI ══════════════════════════════════════════════════════════
 local gui = Instance.new('ScreenGui'); gui.Name = 'HSHub_AutoSpawn_' .. math.random(1e5, 1e6)
 gui.ResetOnSpawn = false; gui.IgnoreGuiInset = true; gui.Parent = (gethui and gethui()) or PG
-shared.__HSHub_AutoSpawn = gui
+shared.__HSHub_AutoSpawn = gui; panelGui = gui
 local frame = Instance.new('Frame', gui); frame.Size = UDim2.new(0, 380, 0, 410); frame.Position = UDim2.new(0, 20, 0.5, -205)
 frame.BackgroundColor3 = Color3.fromRGB(18, 20, 28); frame.BorderSizePixel = 0; frame.Active = true; frame.Draggable = true
 Instance.new('UICorner', frame).CornerRadius = UDim.new(0, 10); Instance.new('UIStroke', frame).Color = Color3.fromRGB(140, 100, 220)
