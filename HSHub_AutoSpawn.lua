@@ -1,23 +1,20 @@
 --[[
-    HS HUB · AutoSpawn v8  —  REAL tap via VirtualInputManager
+    HS HUB · AutoSpawn v10  —  proven tap method (ported from user's King Legacy script)
     discord.gg/5rpP6faZSJ
 
-    v7 finding: firesignal/getconnections did NOT actually press Mainkan (the
-    "ENTERED GAME" was the user's own finger). CoS routes input through a central
-    handler, so only a REAL input at the button's coordinates works.
-    v8 uses VirtualInputManager to send a real mouse+touch tap at the button center.
+    Tap method (KL-proven): event-fire first → if fail, VIM tap at button center.
+    Mobile uses RAW AbsolutePosition (no inset), tries offsets {0,-inset,+inset} and
+    VERIFIES (inGame changed) — learns the winning offset and reuses it. mobile click =
+    SendMouseButtonEvent + SendTouchEvent. PC adds GuiInset.Y.
 
-    FLOW:
-      Read Slots → see creatures.   TAP Mainkan → real-tap just the Play button
-      (test). TEST: Play → select alive card + tap Mainkan. AUTO → repeats itself.
-      Save Log → writes HSHub_AutoSpawn_log.txt + clipboard.
+    FLOW: Read → Tap S1/S2/S3 (test slot switching) → TAP Mainkan (enters game?) → AUTO.
 ]]
 
 if shared.__HSHub_AutoSpawn then pcall(function() shared.__HSHub_AutoSpawn:Destroy() end) end
 
 local Players    = game:GetService('Players')
 local Workspace  = game:GetService('Workspace')
-local VIM        = game:GetService('VirtualInputManager')
+local UIS        = game:GetService('UserInputService')
 local GuiService = game:GetService('GuiService')
 local LP = Players.LocalPlayer
 local PG = LP:WaitForChild('PlayerGui')
@@ -25,53 +22,55 @@ local PG = LP:WaitForChild('PlayerGui')
 local AUTO = false
 local logFn
 local logLines = {}
+local learnedOff = nil   -- the VIM Y offset that worked (mobile)
 
--- ═══ REAL TAP at a GUI's screen center (mouse + touch) ═══════════
-local function centerOf(gobj)
-    local ap, az = gobj.AbsolutePosition, gobj.AbsoluteSize
-    return ap.X + az.X / 2, ap.Y + az.Y / 2
-end
-local function tap(gobj, label)
-    if not gobj then logFn('tap: nil ' .. tostring(label), true); return false end
-    local x, y = centerOf(gobj)
-    logFn(('tap %s @(%d,%d)'):format(tostring(label or gobj.Name), x, y))
-    local ok = pcall(function()
-        -- mouse
-        if VIM.SendMouseMoveEvent then VIM:SendMouseMoveEvent(x, y, game) end
-        VIM:SendMouseButtonEvent(x, y, 0, true, game, 1)
-        task.wait(0.06)
-        VIM:SendMouseButtonEvent(x, y, 0, false, game, 1)
-    end)
-    -- touch backup (mobile)
-    pcall(function()
-        if VIM.SendTouchEvent then
-            VIM:SendTouchEvent(1, 0, x, y); task.wait(0.06); VIM:SendTouchEvent(1, 3, x, y)
-        end
-    end)
-    return ok
-end
+-- ═══ platform + input primitives (from King Legacy) ══════════════
+local IS_MOBILE, IS_PC, IS_IOS, IS_POTASSIUM = false, false, false, false
+pcall(function()
+    local p = UIS:GetPlatform()
+    if p == Enum.Platform.IOS then IS_IOS = true; IS_MOBILE = true
+    elseif p == Enum.Platform.Android then IS_MOBILE = true
+    elseif p == Enum.Platform.Windows or p == Enum.Platform.OSX or p == Enum.Platform.UWP then IS_PC = true end
+end)
+if not IS_PC and not IS_MOBILE then if UIS.TouchEnabled then IS_MOBILE = true else IS_PC = true end end
+pcall(function() if getexecutorname and tostring(getexecutorname()):lower():find('potassium') then IS_POTASSIUM = true end end)
+local VIM; pcall(function() VIM = game:GetService('VirtualInputManager') end)
+local GUI_INSET = Vector2.new(0, 0); pcall(function() GUI_INSET = GuiService:GetGuiInset() end)
 
--- ═══ lobby GUI + buttons ═════════════════════════════════════════
+local function vimTouch(x, y) if not VIM then return end
+    pcall(function() VIM:SendTouchEvent(1, 0, x, y) end); task.wait(0.06); pcall(function() VIM:SendTouchEvent(1, 2, x, y) end) end
+local function vimMouse(x, y) if not VIM then return end
+    pcall(function() VIM:SendMouseButtonEvent(x, y, 0, true, game, 1) end); task.wait(0.05); pcall(function() VIM:SendMouseButtonEvent(x, y, 0, false, game, 1) end) end
+local function potClick(x, y) pcall(function() mousemoveabs(x, y) end); task.wait(0.03); pcall(function() mouse1click() end) end
+local function vimClick(x, y)
+    if IS_POTASSIUM and IS_PC then potClick(x, y); return end
+    if IS_PC then if VIM then vimMouse(x, y) elseif IS_POTASSIUM then potClick(x, y) end
+    else vimMouse(x, y); task.wait(0.1); vimTouch(x, y) end
+end
+local function fireGuiButton(btn)
+    if not btn then return end
+    pcall(function() if typeof(firesignal) == 'function' then firesignal(btn.MouseButton1Click); firesignal(btn.Activated); return end end)
+    pcall(function() if typeof(fireclick) == 'function' then fireclick(btn) end end)
+    pcall(function() if getconnections then for _, c in ipairs(getconnections(btn.MouseButton1Click)) do pcall(function() c:Fire() end) end end end)
+end
+local function centerOf(b) local ap, as = b.AbsolutePosition, b.AbsoluteSize; return ap.X + as.X / 2, ap.Y + as.Y / 2 end
+
+-- ═══ lobby GUI + slots ═══════════════════════════════════════════
 local function findSaveGui()
-    for _, r in ipairs({ PG, gethui and gethui() or PG }) do
-        local g = r:FindFirstChild('SaveSelectionGui'); if g then return g end
-    end
+    for _, r in ipairs({ PG, gethui and gethui() or PG }) do local g = r:FindFirstChild('SaveSelectionGui'); if g then return g end end
 end
 local function findPlayButton()
     local gui = findSaveGui(); if not gui then return nil end
     local fb
     for _, d in ipairs(gui:GetDescendants()) do
         if d.Name == 'PlayButton' and (d:IsA('ImageButton') or d:IsA('TextButton')) then
-            fb = fb or d
-            local p = d.Parent
-            while p and p ~= gui do if p.Name == 'ButtonsFrame' then return d end p = p.Parent end
+            fb = fb or d; local p = d.Parent; while p and p ~= gui do if p.Name == 'ButtonsFrame' then return d end p = p.Parent end
         end
     end
     return fb
 end
 local function readSlots()
-    local out = {}
-    local gui = findSaveGui(); if not gui then return out end
+    local out = {}; local gui = findSaveGui(); if not gui then return out end
     local sf; for _, d in ipairs(gui:GetDescendants()) do if d.Name == 'SlotsFrame' then sf = d; break end end
     if not sf then return out end
     for _, child in ipairs(sf:GetChildren()) do
@@ -90,53 +89,66 @@ local function readSlots()
     table.sort(out, function(a, b) return a.n < b.n end)
     return out
 end
+local function slotByN(n) for _, s in ipairs(readSlots()) do if s.n == n then return s end end end
 local function inGame()
     local chars = Workspace:FindFirstChild('Characters')
     return chars and (chars:FindFirstChild(LP.Name) or chars:FindFirstChild(LP.DisplayName)) and true or false
 end
 local function lobbyReady()
     local pb = findPlayButton(); if not pb then return false end
-    local ok = true
-    pcall(function() local n = pb; while n and n:IsA('GuiObject') do if not n.Visible then ok = false; break end n = n.Parent end end)
+    local ok = true; pcall(function() local n = pb; while n and n:IsA('GuiObject') do if not n.Visible then ok = false break end n = n.Parent end end)
     return ok
 end
 
--- ═══ PLAY ════════════════════════════════════════════════════════
-local function playSlot(s)
-    -- select the card (tap it), then tap the global Mainkan
-    if s.card then
-        local sel = s.card:FindFirstChild('ViewButton') or s.card
-        tap(sel, 'card ' .. s.slot); task.wait(0.7)
+-- ═══ TAP a button, verify a state change (KL multi-offset) ═══════
+-- verify(): returns true when the tap succeeded. waitPer = seconds to wait per offset.
+local function smartTap(btn, label, verify, waitPer)
+    if not btn then logFn('tap nil: ' .. tostring(label), true); return false end
+    waitPer = waitPer or 0.5
+    -- 1) event-fire
+    fireGuiButton(btn); task.wait(waitPer)
+    if verify and verify() then logFn('✓ ' .. label .. ' (event)'); return true end
+    if not verify then end
+    -- 2) VIM tap
+    local rx, ry = centerOf(btn)
+    local offsets
+    if IS_PC then offsets = { GUI_INSET.Y }
+    elseif learnedOff then offsets = { learnedOff }
+    else offsets = { 0, -GUI_INSET.Y, GUI_INSET.Y } end
+    for _, off in ipairs(offsets) do
+        logFn(('tap %s @(%d,%d) off=%d'):format(label, math.floor(rx), math.floor(ry + off), math.floor(off)))
+        vimClick(rx, ry + off)
+        if not verify then return true end
+        local t = tick(); repeat task.wait(0.4) until verify() or tick() - t > waitPer
+        if verify() then if not IS_PC then learnedOff = off end logFn('✓ ' .. label .. ' (off=' .. math.floor(off) .. ')'); return true end
     end
-    local pb = findPlayButton()
-    if not pb then logFn('✗ Mainkan not found', true); return false end
-    tap(pb, 'Mainkan')
-    local t = tick(); repeat task.wait(0.5) until inGame() or tick() - t > 7
-    if inGame() then logFn('✓ ENTERED GAME', false) else logFn('… still in lobby', true) end
-    return inGame()
-end
-local function playAlive()
-    local slots = readSlots()
-    if #slots == 0 then logFn('no slots', true); return false end
-    local tgt; for _, s in ipairs(slots) do if not s.dead then tgt = s; break end end
-    if not tgt then logFn('all DEAD (restart TODO)', true); return false end
-    return playSlot(tgt)
+    if verify then logFn('✗ ' .. label .. ' failed (all offsets)', true) end
+    return false
 end
 
--- ═══ AUTO loop (wait for stable lobby, retry) ════════════════════
+-- ═══ PLAY ════════════════════════════════════════════════════════
+local function selectCard(s)
+    if not s.card then return end
+    smartTap(s.card:FindFirstChild('ViewButton') or s.card, 'select ' .. s.slot, nil, 0.3)
+end
+local function playSlot(s)
+    selectCard(s); task.wait(0.7)
+    local pb = findPlayButton()
+    return smartTap(pb, 'Mainkan', inGame, 3)
+end
+local function playAlive()
+    local slots = readSlots(); if #slots == 0 then logFn('no slots', true); return false end
+    local tgt; for _, s in ipairs(slots) do if not s.dead then tgt = s; break end end
+    if not tgt then logFn('all DEAD (restart TODO)', true); return false end
+    logFn('play ' .. tgt.slot .. ' (' .. tgt.name .. ')'); return playSlot(tgt)
+end
+
 local busy = false
 task.spawn(function()
-    while true do
-        task.wait(2)
+    while true do task.wait(2)
         if AUTO and not busy and not inGame() and lobbyReady() then
-            busy = true
-            task.wait(1.5 + math.random())            -- settle after death->lobby
-            if not inGame() and lobbyReady() then
-                for attempt = 1, 3 do
-                    if playAlive() then break end
-                    task.wait(2)
-                end
-            end
+            busy = true; task.wait(1.5 + math.random())
+            if not inGame() and lobbyReady() then for a = 1, 2 do if playAlive() then break end task.wait(2) end end
             busy = false
         end
     end
@@ -146,31 +158,34 @@ end)
 local gui = Instance.new('ScreenGui'); gui.Name = 'HSHub_AutoSpawn_' .. math.random(1e5, 1e6)
 gui.ResetOnSpawn = false; gui.IgnoreGuiInset = true; gui.Parent = (gethui and gethui()) or PG
 shared.__HSHub_AutoSpawn = gui
-local frame = Instance.new('Frame', gui); frame.Size = UDim2.new(0, 370, 0, 390); frame.Position = UDim2.new(0, 20, 0.5, -195)
+local frame = Instance.new('Frame', gui); frame.Size = UDim2.new(0, 380, 0, 410); frame.Position = UDim2.new(0, 20, 0.5, -205)
 frame.BackgroundColor3 = Color3.fromRGB(18, 20, 28); frame.BorderSizePixel = 0; frame.Active = true; frame.Draggable = true
 Instance.new('UICorner', frame).CornerRadius = UDim.new(0, 10); Instance.new('UIStroke', frame).Color = Color3.fromRGB(140, 100, 220)
-local hdr = Instance.new('Frame', frame); hdr.Size = UDim2.new(1, 0, 0, 40); hdr.BackgroundColor3 = Color3.fromRGB(110, 80, 190); hdr.BorderSizePixel = 0
+local hdr = Instance.new('Frame', frame); hdr.Size = UDim2.new(1, 0, 0, 38); hdr.BackgroundColor3 = Color3.fromRGB(110, 80, 190); hdr.BorderSizePixel = 0
 Instance.new('UICorner', hdr).CornerRadius = UDim.new(0, 10)
-local ttl = Instance.new('TextLabel', hdr); ttl.BackgroundTransparency = 1; ttl.Size = UDim2.new(1, -46, 1, 0); ttl.Position = UDim2.new(0, 12, 0, 0)
-ttl.Font = Enum.Font.GothamBold; ttl.TextSize = 15; ttl.TextColor3 = Color3.fromRGB(245, 245, 250); ttl.TextXAlignment = Enum.TextXAlignment.Left; ttl.Text = 'HS HUB · AutoSpawn v8'
-local xB = Instance.new('TextButton', hdr); xB.BackgroundTransparency = 1; xB.Size = UDim2.new(0, 36, 0, 36); xB.Position = UDim2.new(1, -40, 0, 2)
-xB.Font = Enum.Font.GothamBold; xB.TextSize = 22; xB.TextColor3 = Color3.fromRGB(255, 255, 255); xB.Text = '×'
+local ttl = Instance.new('TextLabel', hdr); ttl.BackgroundTransparency = 1; ttl.Size = UDim2.new(1, -44, 1, 0); ttl.Position = UDim2.new(0, 12, 0, 0)
+ttl.Font = Enum.Font.GothamBold; ttl.TextSize = 14; ttl.TextColor3 = Color3.fromRGB(245, 245, 250); ttl.TextXAlignment = Enum.TextXAlignment.Left; ttl.Text = 'HS HUB · AutoSpawn v10'
+local xB = Instance.new('TextButton', hdr); xB.BackgroundTransparency = 1; xB.Size = UDim2.new(0, 34, 0, 34); xB.Position = UDim2.new(1, -38, 0, 2)
+xB.Font = Enum.Font.GothamBold; xB.TextSize = 20; xB.TextColor3 = Color3.fromRGB(255, 255, 255); xB.Text = '×'
 xB.MouseButton1Click:Connect(function() AUTO = false; gui:Destroy(); shared.__HSHub_AutoSpawn = nil end)
-local function mkBtn(lbl, col, x, w, y, h)
-    local b = Instance.new('TextButton', frame); b.Size = UDim2.new(0, w, 0, h or 30); b.Position = UDim2.new(0, x, 0, y)
+local function mkBtn(lbl, col, x, w, y)
+    local b = Instance.new('TextButton', frame); b.Size = UDim2.new(0, w, 0, 28); b.Position = UDim2.new(0, x, 0, y)
     b.BackgroundColor3 = col; b.BorderSizePixel = 0; b.Font = Enum.Font.GothamBold; b.TextSize = 12; b.TextColor3 = Color3.fromRGB(245, 245, 250); b.Text = lbl
     Instance.new('UICorner', b).CornerRadius = UDim.new(0, 6); return b
 end
-local readBtn = mkBtn('🔍 Read Slots', Color3.fromRGB(60, 130, 190), 12, 168, 50)
-local tapBtn  = mkBtn('👆 TAP Mainkan', Color3.fromRGB(170, 120, 60), 190, 168, 50)
-local playBtn = mkBtn('▶ TEST: Play', Color3.fromRGB(60, 160, 110), 12, 168, 86)
-local saveBtn = mkBtn('💾 Save Log', Color3.fromRGB(90, 100, 130), 190, 168, 86)
-local autoBtn = mkBtn('AUTO: OFF', Color3.fromRGB(70, 74, 88), 12, 346, 122)
-autoBtn.MouseButton1Click:Connect(function()
-    AUTO = not AUTO; autoBtn.BackgroundColor3 = AUTO and Color3.fromRGB(70, 150, 110) or Color3.fromRGB(70, 74, 88)
-    autoBtn.Text = 'AUTO: ' .. (AUTO and 'ON (repeats itself)' or 'OFF'); logFn(AUTO and 'AUTO on' or 'AUTO off')
-end)
-local scroll = Instance.new('ScrollingFrame', frame); scroll.Size = UDim2.new(1, -18, 0, 222); scroll.Position = UDim2.new(0, 9, 0, 160)
+local readBtn = mkBtn('🔍 Read', Color3.fromRGB(60, 130, 190), 10, 110, 46)
+local tapMain = mkBtn('👆 TAP Mainkan', Color3.fromRGB(170, 120, 60), 126, 130, 46)
+local playBtn = mkBtn('▶ TEST Play', Color3.fromRGB(60, 160, 110), 262, 108, 46)
+local s1 = mkBtn('Tap S1', Color3.fromRGB(70, 110, 160), 10, 84, 80)
+local s2 = mkBtn('Tap S2', Color3.fromRGB(70, 110, 160), 100, 84, 80)
+local s3 = mkBtn('Tap S3', Color3.fromRGB(70, 110, 160), 190, 84, 80)
+local saveBtn = mkBtn('💾 Save Log', Color3.fromRGB(90, 100, 130), 280, 90, 80)
+local autoBtn = mkBtn('AUTO: OFF', Color3.fromRGB(70, 74, 88), 10, 360, 114)
+autoBtn.MouseButton1Click:Connect(function() AUTO = not AUTO
+    autoBtn.BackgroundColor3 = AUTO and Color3.fromRGB(70, 150, 110) or Color3.fromRGB(70, 74, 88)
+    autoBtn.Text = 'AUTO: ' .. (AUTO and 'ON (repeats itself)' or 'OFF'); logFn(AUTO and 'AUTO on' or 'AUTO off') end)
+
+local scroll = Instance.new('ScrollingFrame', frame); scroll.Size = UDim2.new(1, -18, 0, 252); scroll.Position = UDim2.new(0, 9, 0, 150)
 scroll.BackgroundColor3 = Color3.fromRGB(11, 13, 19); scroll.BorderSizePixel = 0; scroll.ScrollBarThickness = 4; scroll.ScrollBarImageColor3 = Color3.fromRGB(140, 100, 220)
 Instance.new('UICorner', scroll).CornerRadius = UDim.new(0, 6)
 local lo = Instance.new('UIListLayout', scroll); lo.Padding = UDim.new(0, 2); lo.SortOrder = Enum.SortOrder.LayoutOrder
@@ -182,23 +197,25 @@ logFn = function(txt, isErr)
     lb.TextXAlignment = Enum.TextXAlignment.Left; lb.TextTruncate = Enum.TextTruncate.AtEnd; lb.Text = txt
     scroll.CanvasSize = UDim2.new(0, 0, 0, #scroll:GetChildren() * 18); scroll.CanvasPosition = Vector2.new(0, scroll.CanvasSize.Y.Offset)
 end
-logFn('v8: REAL tap via VirtualInputManager.')
-logFn('VIM mouse=' .. tostring(VIM.SendMouseButtonEvent ~= nil) .. ' touch=' .. tostring(VIM.SendTouchEvent ~= nil))
-logFn('1) Read Slots  2) TAP Mainkan (test)  3) AUTO')
+logFn(('v10. platform=%s VIM=%s inset.Y=%d'):format(IS_PC and 'PC' or 'MOBILE', tostring(VIM ~= nil), math.floor(GUI_INSET.Y)))
+logFn('Test: Tap S1/S2/S3 (switch?) → TAP Mainkan (enter?).')
 
 readBtn.MouseButton1Click:Connect(function()
     local slots = readSlots()
     logFn(('── slots:%d in_game=%s PlayBtn=%s ──'):format(#slots, tostring(inGame()), findPlayButton() and 'found' or 'MISSING'), Color3.fromRGB(120, 210, 255))
     for _, s in ipairs(slots) do logFn(('  %s %s %s'):format(s.slot, s.name, s.dead and 'DEAD' or 'ALIVE'), s.dead and Color3.fromRGB(255, 140, 140) or Color3.fromRGB(150, 230, 150)) end
 end)
-tapBtn.MouseButton1Click:Connect(function() task.spawn(function()
-    local pb = findPlayButton(); if pb then tap(pb, 'Mainkan'); task.wait(2); logFn(inGame() and '✓ ENTERED GAME' or '… still lobby', not inGame()) else logFn('Mainkan MISSING', true) end
+local function testSlot(n) local s = slotByN(n); if s and s.card then smartTap(s.card:FindFirstChild('ViewButton') or s.card, 'Slot' .. n .. '(' .. s.name .. ')', nil, 0.3) else logFn('slot ' .. n .. ' not found', true) end end
+s1.MouseButton1Click:Connect(function() task.spawn(function() testSlot(1) end) end)
+s2.MouseButton1Click:Connect(function() task.spawn(function() testSlot(2) end) end)
+s3.MouseButton1Click:Connect(function() task.spawn(function() testSlot(3) end) end)
+tapMain.MouseButton1Click:Connect(function() task.spawn(function()
+    local pb = findPlayButton(); if pb then smartTap(pb, 'Mainkan', inGame, 3) else logFn('Mainkan MISSING', true) end
 end) end)
 playBtn.MouseButton1Click:Connect(function() task.spawn(playAlive) end)
 saveBtn.MouseButton1Click:Connect(function()
-    local txt = table.concat(logLines, '\n')
-    local s = false
+    local txt = table.concat(logLines, '\n'); local s = false
     pcall(function() if writefile then writefile('HSHub_AutoSpawn_log.txt', txt); s = true end end)
     pcall(function() if setclipboard then setclipboard(txt) elseif toclipboard then toclipboard(txt) end end)
-    logFn(s and 'saved HSHub_AutoSpawn_log.txt + clipboard' or 'clipboard only', false)
+    logFn(s and 'saved log.txt + clipboard' or 'clipboard only')
 end)
