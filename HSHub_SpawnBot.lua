@@ -32,6 +32,29 @@ if not IS_PC and not UIS.TouchEnabled then IS_PC = true end
 local VIM; pcall(function() VIM = game:GetService('VirtualInputManager') end)
 local function inset() local i = GuiService:GetGuiInset(); return i or Vector2.new(0, 0) end
 
+-- AUTO device offset = topbar inset (GuiInset) + device SAFE-AREA inset (notch).
+-- GuiInset gives Y (topbar); the safe-area probe gives the notch X that GuiInset misses
+-- on landscape phones → fully automatic, all devices, no manual calibration.
+local function autoOffset()
+    local gi = inset()                         -- topbar inset (e.g. (0,58))
+    local sx, sy = 0, 0
+    pcall(function()
+        local probe = Instance.new('ScreenGui')
+        probe.IgnoreGuiInset = true            -- ignore topbar so we measure ONLY the safe area
+        pcall(function() probe.ScreenInsets = Enum.ScreenInsets.DeviceSafeInsets end)
+        probe.Parent = (gethui and gethui()) or PG
+        local f = Instance.new('Frame', probe); f.BackgroundTransparency = 1
+        f.Position = UDim2.new(0, 0, 0, 0); f.Size = UDim2.new(0, 8, 0, 8)
+        task.wait()                            -- let layout compute
+        local ap = f.AbsolutePosition
+        sx, sy = ap.X, ap.Y                    -- safe-area top-left = notch/status offsets
+        probe:Destroy()
+    end)
+    -- combine: X from whichever inset is larger (notch), Y from topbar (GuiInset) or safe-area
+    return Vector2.new(math.max(gi.X, sx), math.max(gi.Y, sy))
+end
+local OFFSET = autoOffset()
+
 -- ═══ DEVICE-AGNOSTIC TAP: AbsolutePosition + size/2 + GuiInset ════
 local function vimTap(x, y)
     if not VIM then return end
@@ -48,9 +71,8 @@ end
 local function tapButton(btn, label)
     if not btn then logFn('tap nil: ' .. tostring(label), true); return false end
     local ap, az = btn.AbsolutePosition, btn.AbsoluteSize
-    local ins = inset()
-    local x = ap.X + az.X / 2 + ins.X
-    local y = ap.Y + az.Y / 2 + ins.Y          -- ★ +GuiInset = the device-agnostic fix
+    local x = ap.X + az.X / 2 + OFFSET.X
+    local y = ap.Y + az.Y / 2 + OFFSET.Y        -- ★ +calibrated OFFSET (learned per device)
     logFn(('tap %s @(%d,%d)'):format(tostring(label), math.floor(x), math.floor(y)))
     local was = panelGui and panelGui.Enabled
     if panelGui then panelGui.Enabled = false; task.wait(0.08) end
@@ -175,8 +197,9 @@ logFn = function(t, e) local lb = Instance.new('TextLabel', scroll); lb.Backgrou
     lb.Font = Enum.Font.Code; lb.TextSize = 12; lb.TextColor3 = e and Color3.fromRGB(255, 140, 140) or Color3.fromRGB(190, 215, 235); lb.TextXAlignment = Enum.TextXAlignment.Left; lb.TextTruncate = Enum.TextTruncate.AtEnd; lb.Text = t
     scroll.CanvasSize = UDim2.new(0, 0, 0, #scroll:GetChildren() * 18); scroll.CanvasPosition = Vector2.new(0, scroll.CanvasSize.Y.Offset) end
 local _i = inset()
-logFn(('SpawnBot. inset=(%d,%d) %s'):format(math.floor(_i.X), math.floor(_i.Y), IS_PC and 'PC' or 'MOBILE'))
-logFn('Read → TEST Play. Tap coord = AbsolutePos + GuiInset (all-device).')
+logFn(('SpawnBot %s. GuiInset=(%d,%d)  AUTO OFFSET=(%d,%d)'):format(IS_PC and 'PC' or 'MOBILE', math.floor(_i.X), math.floor(_i.Y), math.floor(OFFSET.X), math.floor(OFFSET.Y)))
+logFn('tap = AbsolutePos + OFFSET (auto-detected, all-device). Read → TEST Play.')
+logFn('if OFFSET.X looks wrong, tell me the numbers — manual override is easy.')
 
 readBtn.MouseButton1Click:Connect(function()
     local s = readSlots()
