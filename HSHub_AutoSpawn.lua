@@ -55,6 +55,34 @@ local function clickHidden(x, y)
     vimClick(x, y)
     if panelGui then task.wait(0.05); panelGui.Enabled = was end
 end
+-- GENUINE human-like tap (no firesignal — firing events = "script disturbing game" =
+-- anti-cheat flags it = blackscreen). Mimics a real finger: move → press → hold → release,
+-- with micro-jitter + random hold so it isn't robotic. Panel hidden so it doesn't block.
+local function genuineTap(x, y)
+    x = x + math.random(-2, 2); y = y + math.random(-2, 2)
+    local was = panelGui and panelGui.Enabled
+    if panelGui then panelGui.Enabled = false; task.wait(0.08) end
+    pcall(function() if VIM and VIM.SendMouseMoveEvent then VIM:SendMouseMoveEvent(x, y, game) end end)
+    task.wait(0.03 + math.random() * 0.04)
+    if IS_PC then
+        pcall(function() VIM:SendMouseButtonEvent(x, y, 0, true, game, 1) end)
+        task.wait(0.07 + math.random() * 0.06)
+        pcall(function() VIM:SendMouseButtonEvent(x, y, 0, false, game, 1) end)
+    else
+        pcall(function() VIM:SendTouchEvent(1, 0, x, y) end)        -- began
+        task.wait(0.07 + math.random() * 0.06)
+        pcall(function() VIM:SendTouchEvent(1, 2, x, y) end)        -- ended
+    end
+    if panelGui then task.wait(0.08); panelGui.Enabled = was end
+end
+local function tapMainkanGenuine(pb)
+    local rx, ry = centerOf(pb)
+    local off = IS_PC and GUI_INSET.Y or 0
+    logFn(('genuine tap Mainkan @(%d,%d)'):format(math.floor(rx), math.floor(ry + off)))
+    genuineTap(rx, ry + off)
+    local t = tick(); repeat task.wait(0.5) until inGame() or tick() - t > 9
+    return inGame()
+end
 local function fireGuiButton(btn)
     if not btn then return end
     pcall(function() if typeof(firesignal) == 'function' then firesignal(btn.MouseButton1Click); firesignal(btn.Activated); return end end)
@@ -103,13 +131,22 @@ local function playCandidates(doLog)
     end
     return out
 end
+-- the real Mainkan = the button literally NAMED "PlayButton" in SaveSelectionGui,
+-- small size (~60x21), visible. (Confirmed by button dump @(408,214).)
 local function findPlayButton()
-    local c = playCandidates(false)
-    if #c == 0 then return nil end
-    -- the real green Mainkan sits at the BOTTOM of the centered card (largest Y);
-    -- favorite/Simpan & hidden ones are higher. Pick the lowest-on-screen visible candidate.
-    table.sort(c, function(a, b) return a.y > b.y end)
-    return c[1].btn
+    local roots = { PG }; pcall(function() if gethui then roots[#roots + 1] = gethui() end end)
+    for _, root in ipairs(roots) do
+        for _, sg in ipairs(root:GetChildren()) do
+            if sg:IsA('ScreenGui') and sg.Name == 'SaveSelectionGui' then
+                for _, d in ipairs(sg:GetDescendants()) do
+                    if d.Name == 'PlayButton' and (d:IsA('ImageButton') or d:IsA('TextButton')) and visibleChain(d) then
+                        if d.AbsoluteSize.X < 200 then return d end   -- the small play button, not a big card frame
+                    end
+                end
+            end
+        end
+    end
+    return nil
 end
 local function readSlots()
     local out = {}; local gui = findSaveGui(); if not gui then return out end
@@ -168,10 +205,9 @@ local function playAlive()
         task.wait(0.9)
         local pb = findPlayButton()      -- visible Mainkan = an ALIVE creature is centered
         if pb then
-            tapButton(pb, 'Mainkan ' .. tgt.name)
-            local t = tick(); repeat task.wait(0.5) until inGame() or tick() - t > 9   -- single tap, long wait (no respam)
-            if inGame() then logFn('✓ ENTERED GAME (' .. tgt.name .. ')'); return true end
-            logFn('✗ tapped Mainkan but no load in 9s (blackscreen?) — stopping, NOT respamming', true)
+            logFn('Mainkan ' .. tgt.name .. ' → genuine tap (no firesignal)')
+            if tapMainkanGenuine(pb) then logFn('✓ ENTERED GAME (' .. tgt.name .. ')'); return true end
+            logFn('✗ no load — if blackscreen = game flagged the input', true)
             return false
         else
             logFn('  ' .. tgt.slot .. ': Mainkan not visible (not centered/playable) → next', true)
@@ -256,29 +292,30 @@ local function btnText(d)
     for _, c in ipairs(d:GetDescendants()) do if c:IsA('TextLabel') and ACTION_TEXTS[c.Text] then return c.Text end end
     return nil
 end
+-- TAP Mainkan = FIRE the PlayButton's own events (no coordinate tap, so no favorite overlap).
+-- If this enters the game, we never need coordinates.
 tapMain.MouseButton1Click:Connect(function() task.spawn(function()
-    local cands = {}
-    local roots = { PG }; pcall(function() if gethui then roots[#roots+1] = gethui() end end)
-    for _, root in ipairs(roots) do
-        for _, sg in ipairs(root:GetChildren()) do
-            if sg:IsA('ScreenGui') then
-                pcall(function() for _, d in ipairs(sg:GetDescendants()) do
-                    if (d:IsA('TextButton') or d:IsA('ImageButton')) and visibleChain(d) then
-                        local txt = btnText(d)
-                        if txt then
-                            local x, y = centerOf(d); local az = d.AbsoluteSize
-                            cands[#cands+1] = { gui = sg.Name, name = d.Name, x = x, y = y, w = az.X, h = az.Y, txt = txt }
-                        end
-                    end
-                end end)
-            end
-        end
+    local pb = findPlayButton()
+    if not pb then logFn('no visible PlayButton — select an ALIVE creature so Mainkan shows', true); return end
+    -- COORDINATE VERIFICATION: tap the SAFE Edit/Sunting button (right next to Mainkan).
+    -- If the EDIT screen opens → coordinate system is CORRECT → Mainkan@408 is right too.
+    local eb
+    for _, root in ipairs({ PG, gethui and gethui() or PG }) do
+        local g = root:FindFirstChild('SaveSelectionGui')
+        if g then for _, d in ipairs(g:GetDescendants()) do
+            if d.Name == 'EditButton' and (d:IsA('ImageButton') or d:IsA('TextButton')) and visibleChain(d) and d.AbsoluteSize.X < 200 then eb = d; break end
+        end end
+        if eb then break end
     end
-    logFn(('── ACTION buttons found: %d ──'):format(#cands), Color3.fromRGB(120, 210, 255))
-    if #cands == 0 then logFn('  NONE — no Mainkan/Sunting on screen. Select a creature so the', true); logFn('  green Mainkan + blue Sunting SHOW, then tap this again.', true) end
-    for _, c in ipairs(cands) do
-        logFn(('  %s.%s [%s] @(%d,%d) %dx%d'):format(c.gui, c.name, c.txt, math.floor(c.x), math.floor(c.y), math.floor(c.w), math.floor(c.h)))
-    end
+    local mx, my = centerOf(pb)
+    logFn(('Mainkan=%s @(%d,%d)'):format(pb.Name, math.floor(mx), math.floor(my)))
+    if not eb then logFn('EditButton not found — but tapping Mainkan coord to test:', true)
+        clickHidden(mx, my); return end
+    local ex, ey = centerOf(eb)
+    logFn(('VERIFY: tapping Sunting/Edit @(%d,%d)'):format(math.floor(ex), math.floor(ey)))
+    clickHidden(ex, ey)
+    logFn('→ did the EDIT/SUNTING screen OPEN? YES=coords correct (Mainkan will work).', Color3.fromRGB(255, 220, 140))
+    logFn('   NO/nothing=coords wrong. BLACK=game flagged tap.', Color3.fromRGB(255, 220, 140))
 end) end)
 playBtn.MouseButton1Click:Connect(function() task.spawn(playAlive) end)
 saveBtn.MouseButton1Click:Connect(function()
