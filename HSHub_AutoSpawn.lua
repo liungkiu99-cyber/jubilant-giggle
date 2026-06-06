@@ -247,34 +247,38 @@ local function testSlot(n) local s = slotByN(n); if s and s.card then tapButton(
 s1.MouseButton1Click:Connect(function() task.spawn(function() testSlot(1) end) end)
 s2.MouseButton1Click:Connect(function() task.spawn(function() testSlot(2) end) end)
 s3.MouseButton1Click:Connect(function() task.spawn(function() testSlot(3) end) end)
--- DIAGNOSTIC: dump every visible button in the lobby GUIs (name, center, size, text),
--- sorted bottom→top, so we can see which one is the real green Mainkan. NO tap.
+-- DIAGNOSTIC: find ACTION buttons (Mainkan/Sunting/Play/Edit/Restart) in ANY ScreenGui.
+-- These appear when a creature card is SELECTED (not just centered). NO tap.
+local ACTION_TEXTS = { Mainkan=1, MAINKAN=1, Play=1, PLAY=1, Sunting=1, SUNTING=1, Edit=1, EDIT=1,
+    ['Mulai ulang']=1, Menghidupkan=1, ['Menghidupkan kembali']=1, Restart=1, Revive=1 }
+local function btnText(d)
+    if d:IsA('TextButton') and ACTION_TEXTS[d.Text] then return d.Text end
+    for _, c in ipairs(d:GetDescendants()) do if c:IsA('TextLabel') and ACTION_TEXTS[c.Text] then return c.Text end end
+    return nil
+end
 tapMain.MouseButton1Click:Connect(function() task.spawn(function()
     local cands = {}
-    for _, gname in ipairs({ 'SaveSelectionGui', 'SlotOverlayGui' }) do
-        for _, r in ipairs({ PG, gethui and gethui() or PG }) do
-            local g = r:FindFirstChild(gname)
-            if g then for _, d in ipairs(g:GetDescendants()) do
-                if (d:IsA('TextButton') or d:IsA('ImageButton')) and visibleChain(d) then
-                    local az = d.AbsoluteSize
-                    if az.X >= 30 and az.Y >= 20 and az.X <= 600 then   -- real tappable buttons only
-                        local x, y = centerOf(d)
-                        local txt = ''
-                        if d:IsA('TextButton') and #d.Text > 0 then txt = d.Text end
-                        if txt == '' then for _, c in ipairs(d:GetDescendants()) do if c:IsA('TextLabel') and #c.Text > 0 and #c.Text < 16 then txt = c.Text; break end end end
-                        cands[#cands + 1] = { name = d.Name, x = x, y = y, w = az.X, h = az.Y, txt = txt, parent = d.Parent and d.Parent.Name or '?' }
+    local roots = { PG }; pcall(function() if gethui then roots[#roots+1] = gethui() end end)
+    for _, root in ipairs(roots) do
+        for _, sg in ipairs(root:GetChildren()) do
+            if sg:IsA('ScreenGui') then
+                pcall(function() for _, d in ipairs(sg:GetDescendants()) do
+                    if (d:IsA('TextButton') or d:IsA('ImageButton')) and visibleChain(d) then
+                        local txt = btnText(d)
+                        if txt then
+                            local x, y = centerOf(d); local az = d.AbsoluteSize
+                            cands[#cands+1] = { gui = sg.Name, name = d.Name, x = x, y = y, w = az.X, h = az.Y, txt = txt }
+                        end
                     end
-                end
-            end end
+                end end)
+            end
         end
     end
-    table.sort(cands, function(a, b) return a.y > b.y end)
-    logFn(('── visible buttons: %d (bottom→top) ──'):format(#cands), Color3.fromRGB(120, 210, 255))
-    for i = 1, math.min(#cands, 18) do
-        local c = cands[i]
-        logFn(('  %s [%s] @(%d,%d) %dx%d p=%s'):format(c.name, c.txt, math.floor(c.x), math.floor(c.y), math.floor(c.w), math.floor(c.h), c.parent))
+    logFn(('── ACTION buttons found: %d ──'):format(#cands), Color3.fromRGB(120, 210, 255))
+    if #cands == 0 then logFn('  NONE — no Mainkan/Sunting on screen. Select a creature so the', true); logFn('  green Mainkan + blue Sunting SHOW, then tap this again.', true) end
+    for _, c in ipairs(cands) do
+        logFn(('  %s.%s [%s] @(%d,%d) %dx%d'):format(c.gui, c.name, c.txt, math.floor(c.x), math.floor(c.y), math.floor(c.w), math.floor(c.h)))
     end
-    logFn('↑ screenshot this — which one is the green Mainkan?', Color3.fromRGB(255, 220, 140))
 end) end)
 playBtn.MouseButton1Click:Connect(function() task.spawn(playAlive) end)
 saveBtn.MouseButton1Click:Connect(function()
